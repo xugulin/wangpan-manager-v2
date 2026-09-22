@@ -65,10 +65,24 @@ class 主窗口(QMainWindow):
         条布局 = QVBoxLayout(条)
         条布局.setContentsMargins(8, 4, 8, 4)
         条布局.setSpacing(4)
+        self.预览 = QLabel()
+        self.预览.setFixedHeight(90)
+        self.预览.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.预览.setStyleSheet("background:#111;color:#888;")
+        self.预览.setText("（鼠标停在进度条上可预览画面）")
+        条布局.addWidget(self.预览)
+        self._预览缓存: dict[int, QImage] = {}
+        self._预览定时器 = QTimer(self)
+        self._预览定时器.setSingleShot(True)
+        self._预览定时器.setInterval(180)
+        self._预览定时器.timeout.connect(self._出预览图)
         self.进度 = QSlider(Qt.Orientation.Horizontal)
         self.进度.setRange(0, 1000)
+        self.进度.setMouseTracking(True)
+        self.进度.installEventFilter(self)
         self.进度.sliderPressed.connect(self._开始拖)
         self.进度.sliderReleased.connect(self._结束拖)
+        self.进度.sliderMoved.connect(self._要预览)
         条布局.addWidget(self.进度)
         行 = QHBoxLayout()
         self.字幕按钮 = QPushButton("💬 字幕")
@@ -98,6 +112,12 @@ class 主窗口(QMainWindow):
         self.下一集.clicked.connect(lambda: self._切列表(1))
         行.addWidget(self.上一集)
         行.addWidget(self.下一集)
+        行.addWidget(QLabel("章节"))
+        self.章节框 = QComboBox()
+        self.章节框.setMinimumWidth(120)
+        self.章节框.addItem("（无章节表）", -1)
+        self.章节框.currentIndexChanged.connect(self._跳章节)
+        行.addWidget(self.章节框)
         行.addWidget(QLabel("倍速"))
         self.倍速框 = QComboBox()
         for 值 in ("0.5", "0.75", "1", "1.25", "1.5", "2", "3"):
@@ -148,6 +168,8 @@ class 主窗口(QMainWindow):
             self.状态.showMessage(f"❌ 打不开：{错}")
             return False
         self.视频.清空()
+        self._预览缓存 = {}
+        self._缩略图器 = None
         # M4：同名字幕自动加载（影片.chs.srt / 影片.ass 等）
         self._字幕们: list = []
         self._字幕序号 = -1
@@ -163,6 +185,7 @@ class 主窗口(QMainWindow):
             self.视频.设置字幕(None, False)
         self.引擎.播放()
         self.播放按钮.setText("⏸ 暂停")
+        self._装章节(str(路径))
         # M5：记住"看过哪儿"，下次接着播
         try:
             时长 = self.引擎.统计.总时长秒
@@ -232,6 +255,23 @@ class 主窗口(QMainWindow):
         if 总 > 0:
             self.引擎.跳转(总 * self.进度.value() / 1000.0)
 
+    def _装章节(self, 路径: str) -> None:
+        """有章节表就把章节填进下拉（没有就显示"无章节表"，不留空控件骗人）。"""
+        self.章节框.blockSignals(True)
+        self.章节框.clear()
+        章节们 = self.引擎.章节们()
+        if not 章节们:
+            self.章节框.addItem("（无章节表）", -1)
+        else:
+            for 项 in 章节们:
+                self.章节框.addItem(f"{时间文本(项.起始秒)} {项.标题}", 项.序号)
+        self.章节框.blockSignals(False)
+
+    def _跳章节(self, _序号: int) -> None:
+        值 = self.章节框.currentData()
+        if isinstance(值, int) and 值 >= 0:
+            self.引擎.跳章节(值)
+
     def _建列表(self, 路径: str) -> None:
         """本地文件：把同目录的视频排成播放列表（按文件名排序）。"""
         目标 = Path(路径)
@@ -283,6 +323,62 @@ class 主窗口(QMainWindow):
         self.视频.设置字幕(轨道, True)
         self.状态.showMessage(f"💬 字幕：{轨道.名字}"
                           f"（{len(轨道.条目们)} 条）")
+
+    def eventFilter(self, 对象, 事件):  # noqa: N802 - Qt 命名
+        """鼠标在进度条上移动 → 起一个"防抖"定时器去解缩略图（不要每像素解一帧）。"""
+        if 对象 is self.进度 and 事件.type() == 事件.Type.MouseMove:
+            if self.引擎.统计.总时长秒 > 0:
+                self._要预览(self.进度.value())
+        return super().eventFilter(对象, 事件)
+
+    def _要预览(self, _值: int) -> None:
+        if self.引擎.统计.总时长秒 > 0:
+            self._预览定时器.start()          # 防抖：连着动只解最后一次
+
+    def _出预览图(self) -> None:
+        """在**工作线程**里解一帧缩略图（绝不能在界面线程里解码，会卡界面）。"""
+        总 = self.引擎.统计.总时长秒
+        if 总 <= 0 or self.引擎.输入 is None:
+            return
+        秒 = 总 * self.进度.value() / 1000.0
+        键 = int(秒)
+        if 键 in self._预览缓存:
+            self._显示预览(self._预览缓存[键], 秒)
+            return
+        地址 = self.引擎.输入.地址
+        头 = dict(getattr(self.引擎, "_请求头", {}) or {})
+
+        def 干活():
+            from ..player.缩略图 import 缩略图器
+            器 = self._缩略图器 or 缩略图器(地址, 头, 320, self._写日志)
+            self._缩略图器 = 器
+            图 = 器.取图(秒)
+            if 图 is not None:
+                self._预览缓存[键] = 图
+                if len(self._预览缓存) > 60:
+                    self._预览缓存.pop(next(iter(self._预览缓存)))
+            self._预览结果 = (键, 图, 秒)
+
+        import threading
+        self._预览结果 = None
+        threading.Thread(target=干活, daemon=True, name="V2-缩略图").start()
+        QTimer.singleShot(400, self._看预览结果)
+
+    def _看预览结果(self) -> None:
+        结果 = getattr(self, "_预览结果", None)
+        if not 结果:
+            return
+        _键, 图, 秒 = 结果
+        self._预览结果 = None
+        if 图 is not None:
+            self._显示预览(图, 秒)
+
+    def _显示预览(self, 图, 秒: float) -> None:
+        from PySide6.QtGui import QPixmap
+        缩放 = 图.scaledToHeight(84, Qt.TransformationMode.SmoothTransformation)
+        self.预览.setPixmap(QPixmap.fromImage(缩放))
+        self.预览.setText("")
+        self.状态.showMessage(f"预览 {时间文本(秒)}")
 
     def _截图(self) -> None:
         目录 = Path("数据/截图")

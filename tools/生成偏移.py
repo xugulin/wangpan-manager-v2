@@ -37,7 +37,9 @@ from pathlib import Path
     "AVFormatContext": ("nb_streams", "streams", "duration", "start_time",
                        "iformat", "bit_rate", "flags", "pb",
                        # 中断回调：网络源读卡住时要能立刻叫停（否则停止/关窗会悬垂）
-                       "interrupt_callback", "max_delay"),
+                       "interrupt_callback", "max_delay",
+                       # 章节列表（M5：章节跳转）
+                       "chapters", "nb_chapters", "metadata"),
     "AVStream": ("index", "id", "codecpar", "time_base", "start_time",
                  "duration", "avg_frame_rate", "r_frame_rate", "nb_frames",
                  "disposition", "metadata"),
@@ -71,6 +73,7 @@ from pathlib import Path
     "AVCodec": ("name", "long_name", "type", "id", "capabilities"),
     "AVInputFormat": ("name", "long_name", "flags", "extensions"),
     "AVDictionaryEntry": ("key", "value"),
+    "AVChapter": ("id", "time_base", "start", "end", "metadata"),
 }
 
 C程序 = r'''

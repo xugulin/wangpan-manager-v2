@@ -3,7 +3,7 @@
 生成方式：``python3 tools/生成偏移.py``（用 C 编译器的 offsetof 打印，
 见该脚本里的说明：FFmpeg 结构体里夹着私有字段，手写会随版本错位）。
 
-本次生成：137 个字段。运行期只按偏移读，不需要编译器。
+本次生成：145 个字段。运行期只按偏移读，不需要编译器。
 """
 
 from __future__ import annotations
@@ -16,6 +16,11 @@ __all__ = ["偏移", "大小", "偏移表"]
     'AVChannelLayout.opaque': 16,
     'AVChannelLayout.order': 0,
     'AVChannelLayout.u': 8,
+    'AVChapter.end': 24,
+    'AVChapter.id': 0,
+    'AVChapter.metadata': 32,
+    'AVChapter.start': 16,
+    'AVChapter.time_base': 8,
     'AVCodec.capabilities': 24,
     'AVCodec.id': 20,
     'AVCodec.long_name': 8,
@@ -67,11 +72,14 @@ __all__ = ["偏移", "大小", "偏移表"]
     'AVDictionaryEntry.key': 0,
     'AVDictionaryEntry.value': 8,
     'AVFormatContext.bit_rate': 112,
+    'AVFormatContext.chapters': 80,
     'AVFormatContext.duration': 104,
     'AVFormatContext.flags': 128,
     'AVFormatContext.iformat': 8,
     'AVFormatContext.interrupt_callback': 216,
     'AVFormatContext.max_delay': 124,
+    'AVFormatContext.metadata': 192,
+    'AVFormatContext.nb_chapters': 72,
     'AVFormatContext.nb_streams': 44,
     'AVFormatContext.pb': 32,
     'AVFormatContext.start_time': 96,

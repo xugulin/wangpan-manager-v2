@@ -9,6 +9,7 @@ from pathlib import Path
 
 from tests.公用 import 有ffmpeg, 造素材, 临时目录
 
+from wangpan.player.解封装 import 输入
 from wangpan.player.引擎 import 播放引擎, 播放状态, 系统时钟, 音频时钟
 from wangpan.player.记录 import 记录本, 播放记录
 
@@ -100,3 +101,78 @@ class 倍速与逐帧测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 章节与缩略图测试(unittest.TestCase):
+    """M5 剩余项：章节表读取/跳转 + 进度预览用的缩略图。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        if not 有ffmpeg():
+            raise unittest.SkipTest("需要系统 ffmpeg")
+        cls.临时 = 临时目录()
+        基础 = Path(cls.临时.name) / "基础.mp4"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "testsrc2=size=320x180:rate=25:duration=6",
+                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt",
+                        "yuv420p", "-y", str(基础)], check=True, timeout=120)
+        元数据 = Path(cls.临时.name) / "章节.txt"
+        元数据.write_text(
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\n"
+            "title=第一章\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4000\n"
+            "title=第二章\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=4000\nEND=6000\n"
+            "title=第三章\n", encoding="utf-8")
+        cls.带章节 = Path(cls.临时.name) / "带章节.mkv"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(基础),
+                        "-i", str(元数据), "-map_metadata", "1", "-map_chapters", "1",
+                        "-c", "copy", "-y", str(cls.带章节)], check=True, timeout=120)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.临时.cleanup()
+
+    def test_没有章节表就是空列表(self):
+        输入对象 = 输入.打开(str(Path(self.临时.name) / "基础.mp4"))
+        try:
+            self.assertEqual(输入对象.章节们, [])
+        finally:
+            输入对象.关闭()
+
+    def test_读到章节表(self):
+        输入对象 = 输入.打开(str(self.带章节))
+        try:
+            self.assertEqual(len(输入对象.章节们), 3)
+            第一 = 输入对象.章节们[0]
+            self.assertAlmostEqual(第一.起始秒, 0.0, delta=0.05)
+            self.assertAlmostEqual(第一.结束秒, 2.0, delta=0.05)
+            self.assertAlmostEqual(输入对象.章节们[2].起始秒, 4.0, delta=0.05)
+        finally:
+            输入对象.关闭()
+
+    def test_跳章节(self):
+        引擎 = 播放引擎()
+        self.addCleanup(引擎.停止)
+        引擎.打开(str(self.带章节))
+        引擎.播放()
+        time.sleep(0.3)
+        self.assertTrue(引擎.跳章节(2))
+        截止 = time.time() + 4
+        while time.time() < 截止 and 引擎.统计.当前时间秒 < 3.5:
+            time.sleep(0.05)
+        self.assertEqual(引擎.当前章节(), 2, "跳到第三章后当前章节应该是 2")
+        self.assertFalse(引擎.跳章节(99), "越界的章节号要返回 False")
+
+    def test_缩略图能出图(self):
+        from wangpan.player.缩略图 import 缩略图器
+        器 = 缩略图器(str(self.带章节), None, 160)
+        self.addCleanup(器.关闭)
+        图 = 器.取图(3.0)
+        self.assertIsNotNone(图, "缩略图必须能出图")
+        self.assertEqual(图.width(), 160)
+        self.assertEqual(图.height(), 90)
+        # 不是纯黑（说明真的解到了画面）
+        非黑 = sum(1 for x in range(0, 图.width(), 20)
+                 for y in range(0, 图.height(), 20)
+                 if 图.pixelColor(x, y).lightness() > 20)
+        self.assertGreater(非黑, 3, "缩略图不该是纯黑")

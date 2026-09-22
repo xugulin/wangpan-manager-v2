@@ -13,7 +13,7 @@ from ..ffmpeg import 绑定 as B
 from ..ffmpeg.偏移 import 偏移 as 偏移表
 from ..ffmpeg.绑定 import 常量
 
-__all__ = ["流信息", "输入"]
+__all__ = ["流信息", "输入", "章节"]
 
 
 @dataclass
@@ -54,6 +54,16 @@ class 流信息:
 
 
 @dataclass
+class 章节:
+    """一个章节（mkv/mp4 里的章节表）。"""
+
+    序号: int
+    起始秒: float
+    结束秒: float
+    标题: str = ""
+
+
+@dataclass
 class 输入:
     """一个打开的输入（文件 / HTTP 直链）。"""
 
@@ -64,6 +74,7 @@ class 输入:
     视频流: Optional[流信息] = None
     音频流: Optional[流信息] = None
     地址: str = ""
+    章节们: list["章节"] = field(default_factory=list)
     _包指针: int = 0
     _中断回调 = None            # 必须留引用：C 侧会一直持有这个函数指针
     _中断查询 = None
@@ -90,6 +101,8 @@ class 输入:
                 自己.视频流 = 流
             elif 流.是音频 and 自己.音频流 is None:
                 自己.音频流 = 流
+        # 章节（有就列出来；没有就是空列表）
+        自己.章节们 = 自己._读章节()
         # 时长：优先用容器 duration（微秒），否则用视频流时长
         容器时长 = B.读i64(自己.格式指针, "AVFormatContext", "duration")
         自己.时长秒 = (容器时长 / 常量["AV_TIME_BASE"]) if 容器时长 > 0 else 0.0
@@ -98,6 +111,29 @@ class 输入:
         if 自己.视频流 is not None:
             自己.视频流.帧率 = 自己._算帧率(自己.视频流)
         return 自己
+
+    def _读章节(self) -> list[章节]:
+        """读章节表（``AVFormatContext.chapters`` 是 ``AVChapter**``）。
+
+        章节时间是"自己那套 time_base"的（不是流的），所以每个章节单独换算。
+        """
+        import ctypes
+        条数 = B.读i32(self.格式指针, "AVFormatContext", "nb_chapters")
+        数组 = B.读ptr(self.格式指针, "AVFormatContext", "chapters")
+        if 条数 <= 0 or not 数组:
+            return []
+        结果: list[章节] = []
+        for i in range(条数):
+            指针 = int(ctypes.c_void_p.from_address(数组 + 8 * i).value or 0)
+            if not 指针:
+                continue
+            分子, 分母 = B.读rat(指针, "AVChapter", "time_base")
+            比例 = (分子 / 分母) if 分母 else 0.0
+            起 = B.读i64(指针, "AVChapter", "start") * 比例
+            止 = B.读i64(指针, "AVChapter", "end") * 比例
+            结果.append(章节(序号=i, 起始秒=起, 结束秒=止,
+                          标题=f"章节 {i + 1}"))
+        return 结果
 
     def 装中断回调(self, 该中断) -> None:
         """挂一个"要不要中断"的查询（返回 True = 立刻中断 I/O）。

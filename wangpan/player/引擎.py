@@ -377,6 +377,28 @@ class 播放引擎:
                 self.输入.释放新包(新包)
         return False
 
+    def 章节们(self) -> list:
+        return list(getattr(self.输入, "章节们", []) or []) if self.输入 else []
+
+    def 跳章节(self, 序号: int) -> bool:
+        """跳到第 N 个章节（0 起）；没有章节表就返回 False。"""
+        章节们 = self.章节们()
+        if not 章节们 or not (0 <= 序号 < len(章节们)):
+            return False
+        self.跳转(章节们[序号].起始秒)
+        return True
+
+    def 当前章节(self) -> int:
+        """当前时间落在第几个章节（-1 = 没有章节表）。"""
+        章节们 = self.章节们()
+        if not 章节们:
+            return -1
+        现在 = self.统计.当前时间秒
+        for 项 in reversed(章节们):
+            if 现在 >= 项.起始秒:
+                return 项.序号
+        return 0
+
     def 设置输出尺寸(self, 宽: int, 高: int) -> None:
         """告诉解码器界面需要多大（**性能关键**：4K 全尺寸每帧要搬 25 MB）。
 
