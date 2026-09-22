@@ -50,6 +50,10 @@ class 网盘页(QWidget):
         self.刷新按钮 = QPushButton("🔄 刷新")
         self.刷新按钮.clicked.connect(self.刷新)
         行.addWidget(self.刷新按钮)
+        self.登录按钮 = QPushButton("🔑 登录/导入令牌")
+        self.登录按钮.setToolTip("光鸭等网盘：导入令牌文件或粘贴访问令牌")
+        self.登录按钮.clicked.connect(self._登录)
+        行.addWidget(self.登录按钮)
         self.路径标签 = QLabel("/")
         行.addWidget(self.路径标签, 1)
         布局.addLayout(行)
@@ -98,6 +102,34 @@ class 网盘页(QWidget):
 
     # ---------------- 列表 ----------------
 
+    def _登录(self) -> None:
+        """登录当前网盘：能导入令牌文件的导入，否则让用户粘令牌。"""
+        对象 = self.注册表.取(self.当前网盘)
+        有导入 = hasattr(对象, "从文件导入令牌")
+        有粘贴 = hasattr(对象, "用令牌登录")
+        if not (有导入 or 有粘贴):
+            self.提示.setText("这个网盘不需要登录（或走别的授权方式）")
+            return
+        if 有导入:
+            路径, _ = QFileDialog.getOpenFileName(
+                self, "选一个令牌文件（JSON，含访问令牌/刷新令牌）",
+                str(Path.home()), "令牌 (*.json);;所有文件 (*)")
+            if not 路径:
+                return
+            if 对象.从文件导入令牌(路径):
+                self.提示.setText(f"🔑 已导入令牌：{对象.登录状态()}")
+                self.刷新()
+            else:
+                self.提示.setText("❌ 这个文件里没有可用的令牌")
+            return
+        from PySide6.QtWidgets import QInputDialog
+        文本, 好 = QInputDialog.getText(self, "粘贴访问令牌",
+                                    "access_token（网页端开发者工具里可取）：")
+        if 好 and 文本.strip():
+            对象.用令牌登录(文本.strip())
+            self.提示.setText(f"🔑 已登录：{对象.登录状态()}")
+            self.刷新()
+
     def _换网盘(self) -> None:
         self.当前网盘 = self.下拉.currentData() or ""
         self.当前目录 = "/"
@@ -128,7 +160,14 @@ class 网盘页(QWidget):
             self.表.setItem(行号, 3, QTableWidgetItem("" if 项.是目录 else "双击下载"))
             项目 = self.表.item(行号, 0)
             项目.setData(Qt.ItemDataRole.UserRole, 项)
-        self.提示.setText(f"共 {len(条目们)} 项")
+        尾巴 = ""
+        if hasattr(对象, "登录状态"):
+            try:
+                状态 = 对象.登录状态()
+                尾巴 = "｜🔑 已登录" if 状态.get("已登录") else "｜🔑 未登录（点登录导入令牌）"
+            except Exception:  # noqa: BLE001
+                尾巴 = ""
+        self.提示.setText(f"共 {len(条目们)} 项{尾巴}")
 
     def _选中(self):
         行号 = self.表.currentRow()

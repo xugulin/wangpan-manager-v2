@@ -51,6 +51,11 @@ def 建注册表(配置们: Optional[list[dict]] = None, 路径: Optional[Path] 
         try:
             if 类型 == "本地":
                 表.注册(本地适配器(项.get("根") or "."), 标识)
+            elif 类型 in ("光鸭", "光鸭云盘", "GUANGYA"):
+                from .光鸭 import 光鸭适配器
+                对象 = 光鸭适配器()
+                对象.名字 = str(项.get("名字") or 对象.名字)
+                表.注册(对象, 标识)
             elif 类型.upper() == "HTTP":
                 对象 = HTTP适配器(项.get("基地址") or "", 项.get("请求头"),
                                 项.get("索引地址") or "")
