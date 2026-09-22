@@ -100,7 +100,26 @@ int main(void) {
 '''
 
 
-def 生成() -> dict[str, int]:
+def 头文件主版本(包含目录: str = "") -> str:
+    """读出这套头文件的 avcodec 主版本（决定表存成 偏移_<主版本>.py）。"""
+    import re
+    候选 = []
+    if 包含目录:
+        候选.append(Path(包含目录) / "libavcodec" / "version_major.h")
+    候选.append(Path("/usr/include/libavcodec/version_major.h"))
+    for 路径 in 候选:
+        try:
+            if 路径.is_file():
+                文本 = 路径.read_text(encoding="utf-8", errors="replace")
+                m = re.search(r"LIBAVCODEC_VERSION_MAJOR\s+(\d+)", 文本)
+                if m:
+                    return m.group(1)
+        except Exception:  # noqa: BLE001
+            continue
+    return "?"
+
+
+def 生成(包含目录: str = "") -> dict[str, int]:
     打印行 = []
     for 结构, 字段们 in 要的字段.items():
         for 字段 in 字段们:
@@ -112,10 +131,11 @@ def 生成() -> dict[str, int]:
         编译器 = shutil.which("gcc") or shutil.which("cc")
         if not 编译器:
             raise SystemExit("找不到 gcc（生成偏移需要 C 编译器；用户机器不需要）")
-        编译 = subprocess.run(
-            [编译器, "-o", str(目录 / "偏移"), str(目录 / "偏移.c"),
-             "-lavformat", "-lavcodec", "-lavutil"],
-            capture_output=True, text=True)
+        参数 = [编译器, "-o", str(目录 / "偏移"), str(目录 / "偏移.c")]
+        if 包含目录:
+            参数.append(f"-I{包含目录}")
+        参数 += ["-lavformat", "-lavcodec", "-lavutil"]
+        编译 = subprocess.run(参数, capture_output=True, text=True)
         if 编译.returncode != 0:
             raise SystemExit("编译失败（是不是没装 FFmpeg 开发头文件？）：\n"
                           + 编译.stderr[-2000:])
@@ -135,18 +155,26 @@ def 生成() -> dict[str, int]:
     return 结果
 
 
-def 写文件(表: dict[str, int]) -> None:
+def 写文件(表: dict[str, int], 输出文件: Path = None, 主版本: str = "?") -> None:
+    输出文件 = Path(输出文件) if 输出文件 else 输出
     行 = ['"""FFmpeg 结构体字段偏移（**自动生成，别手改**）。',
          "",
          "生成方式：``python3 tools/生成偏移.py``（用 C 编译器的 offsetof 打印，",
          "见该脚本里的说明：FFmpeg 结构体里夹着私有字段，手写会随版本错位）。",
          "",
          f"本次生成：{len(表)} 个字段。运行期只按偏移读，不需要编译器。",
+         "",
+         "⚠️ 结构体布局**随 FFmpeg 大版本变化**：这份表只对下面这个主版本有效。",
+         "   绑定层会在启动时用 avcodec_version() 核对，不匹配就直接报错，",
+         "   绝不会拿错位的偏移去读内存（Windows CI 上正是这么抓到 61/63 混用的）。",
          '"""',
          "",
          "from __future__ import annotations",
          "",
-         "__all__ = [\"偏移\", \"大小\", \"偏移表\"]",
+         f"#: 这份偏移表对应的 libavcodec 主版本",
+         f"对应主版本 = {主版本!r}",
+         "",
+         "__all__ = [\"偏移\", \"大小\", \"偏移表\", \"对应主版本\"]",
          "",
          "#: 结构体.字段 → 字节偏移",
          "偏移: dict[str, int] = {"]
@@ -168,21 +196,25 @@ def 写文件(表: dict[str, int]) -> None:
     行.append('    """取偏移；没有这个字段时抛 KeyError（比悄悄读错内存好）。"""')
     行.append('    return 偏移[f"{结构}.{字段}"]')
     行.append("")
-    输出.write_text("\n".join(行) + "\n", encoding="utf-8")
+    输出文件.write_text("\n".join(行) + "\n", encoding="utf-8")
 
 
 def main() -> int:
     解析 = argparse.ArgumentParser(description="生成 FFmpeg 字段偏移表")
     解析.add_argument("--查看", action="store_true", help="只打印不写文件")
+    解析.add_argument("--包含目录", default="", help="另一套 FFmpeg 头文件的根目录")
+    解析.add_argument("--输出", default="", help="写到哪个文件（默认 偏移.py）")
     参数 = 解析.parse_args()
-    表 = 生成()
+    表 = 生成(参数.包含目录)
+    主版本 = 头文件主版本(参数.包含目录)
     if 参数.查看:
         for 键 in sorted(表):
             print(f"{键} = {表[键]}")
         return 0
-    写文件(表)
+    目标 = Path(参数.输出) if 参数.输出 else 输出
+    写文件(表, 目标, 主版本)
     结构数 = len({键.split(".", 1)[0] for 键 in 表 if not 键.startswith("sizeof.")})
-    print(f"已写入 {输出}：{结构数} 个结构体、{len(表)} 项")
+    print(f"已写入 {目标}：{结构数} 个结构体、{len(表)} 项（对应主版本 {主版本}）")
     return 0
 
 

@@ -28,6 +28,9 @@ def main() -> int:
     print("版本：", {k: 加载.版本文本(v) for k, v in 加载.库版本().items()})
     print("路径：", {k: 加载.路径(k) for k in
                   ("avformat", "avcodec", "avutil", "swscale", "swresample")})
+    from wangpan.ffmpeg.偏移 import 对应主版本
+    运行时 = (int(加载.库("avcodec").avcodec_version()) >> 16) & 0xFF
+    print(f"偏移表主版本：{对应主版本}｜运行时 avcodec 主版本：{运行时}")
     绑定.取绑定().检查ABI()
     print("ABI 自检：通过（偏移表与当前库匹配）")
     return 0

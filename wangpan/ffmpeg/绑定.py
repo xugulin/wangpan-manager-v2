@@ -21,7 +21,7 @@ import ctypes
 from typing import Optional
 
 from . import 加载
-from .偏移 import 偏移, 大小
+from .偏移 import 对应主版本, 偏移, 大小
 
 __all__ = ["绑定", "取绑定", "读i32", "读i64", "读ptr", "读rat", "写i32", "写i64",
            "写ptr", "常量", "错误文本", "偏移"]
@@ -266,6 +266,26 @@ class 绑定:
             问题.append("AVPacket.data/size 偏移顺序不对")
         if 偏移.get("AVFrame.width", -1) >= 偏移.get("AVFrame.height", -1):
             问题.append("AVFrame.width/height 偏移顺序不对")
+        # 偏移表必须和运行时的 FFmpeg 大版本一致（这是最容易悄悄出错的一条）：
+        # 结构体布局随大版本变化，拿 63 的表去读 61 的库会读出看着像数字的垃圾
+        # （Windows CI 实测：帧时间戳变成 671088.64 秒 → 视频线程永远在等一个
+        #  67 万秒之后的时刻 → 25 帧的片子只出 1 帧，且不报任何错）。
+        # 所以这里直接拦住，宁可起不来也不要错着读内存。
+        try:
+            运行时主版本 = str((int(加载.库("avcodec").avcodec_version()) >> 16) & 0xFF)
+        except Exception:  # noqa: BLE001
+            运行时主版本 = "?"
+        if 运行时主版本 != str(对应主版本):
+            问题.append(
+                "FFmpeg 大版本不匹配：偏移表是给 libavcodec "
+                + str(对应主版本)
+                + " 用的，现在加载的是 "
+                + 运行时主版本
+                + "。解决：① 换成 avcodec-"
+                + str(对应主版本)
+                + " 的运行库（推荐）；或 ② 在装了该版本头文件的机器上重跑 "
+                + "tools/生成偏移.py --包含目录 <头文件根> --输出 "
+                + "wangpan/ffmpeg/偏移_<主版本>.py")
         for 库名, 函数 in (("avformat", "av_read_frame"),
                         ("avcodec", "avcodec_send_packet"),
                         ("avutil", "av_frame_alloc"),

@@ -31,8 +31,11 @@ jobs:
       - name: 下载 Windows 版 FFmpeg 运行库（libav* 的 DLL）
         shell: pwsh
         run: |
-          # V2 自己 dlopen libav*，所以只要 DLL 齐就行（不需要 ffmpeg.exe）
-          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip'
+          # V2 自己 dlopen libav*，所以只要 DLL 齐就行（不需要 ffmpeg.exe）。
+          # ⚠️ 必须选 **avcodec 63** 的构建：偏移表是按 63 的头文件生成的，
+          #    拿 61 的 DLL 去配 63 的表会读出垃圾（真机 CI 上踩过：
+          #    帧时间戳变成 671088 秒 → 只出 1 帧）。BtbN 的 master 构建就是 63。
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip'
           Invoke-WebRequest -Uri $url -OutFile ff.zip -TimeoutSec 900
           Expand-Archive ff.zip -DestinationPath ffx -Force
           New-Item -ItemType Directory -Force 运行环境\libav | Out-Null

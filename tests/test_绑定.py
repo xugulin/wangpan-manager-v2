@@ -41,3 +41,42 @@ class 绑定测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 大版本一致性测试(unittest.TestCase):
+    """偏移表必须与运行时 FFmpeg 大版本一致 —— 这是最容易"悄悄错"的地方。
+
+    Windows CI 实测：用 63 的偏移表去读 61 的库，帧时间戳读成 671088.64 秒，
+    视频线程永远在等一个 67 万秒之后的时刻 → 25 帧的片子只出 1 帧，且不报任何错。
+    所以绑定层要在启动时核对，不匹配就直接拦住。
+    """
+
+    def test_偏移表带主版本(self):
+        from wangpan.ffmpeg import 偏移
+        self.assertTrue(偏移.对应主版本.isdigit(), f"主版本异常：{偏移.对应主版本}")
+
+    def test_当前库与偏移表一致(self):
+        from wangpan.ffmpeg import 加载
+        运行时 = str((int(加载.库("avcodec").avcodec_version()) >> 16) & 0xFF)
+        from wangpan.ffmpeg import 偏移
+        self.assertEqual(运行时, str(偏移.对应主版本),
+                         "本机 FFmpeg 与偏移表大版本不一致（跑 tools/生成偏移.py 或换库）")
+        绑定.取绑定().检查ABI()          # 一致时不该抛
+
+    def test_不匹配时要明确报错(self):
+        """假造一个"运行时是 99"的场景：**新建**实例时必须报错。
+
+        注意用新建实例（绑定() 构造里就会自检），不要去动全局单例 ——
+        动单例会让这条测试"看执行顺序吃饭"（先跑别的用例就过、单独跑就错）。
+        """
+        from unittest import mock
+        from wangpan.ffmpeg import 加载, 绑定 as 绑定模块
+        句柄 = 加载.库("avcodec")
+        真的 = 句柄.avcodec_version
+        with mock.patch.object(句柄, "avcodec_version", lambda: (99 << 16)):
+            with self.assertRaises(RuntimeError) as 上:
+                绑定模块.绑定()
+            self.assertIn("大版本不匹配", str(上.exception))
+            self.assertIn("99", str(上.exception))
+        句柄.avcodec_version = 真的                     # 恢复，别影响别的用例
+        绑定模块.取绑定().检查ABI()
