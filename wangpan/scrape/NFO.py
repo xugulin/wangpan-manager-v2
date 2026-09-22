@@ -118,7 +118,6 @@ def 读NFO(路径: Path | str) -> Optional[媒体条目]:
             条目.外部ID[种类] = 值
     # 演职员
     for 节点 in 根.findall("actor"):
-        人 = 人物(名字=_文本(节点, "name"), 角色=None, 来源="nfo")  # type: ignore[arg-type]
         人 = 人物(名字=_文本(节点, "name"), 来源="nfo")
         角色 = _文本(节点, "role")
         条目.参演们.append(参演(人物=人, 工种=人物工种.演员, 角色=角色,

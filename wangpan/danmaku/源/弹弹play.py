@@ -454,6 +454,12 @@ class 弹弹play源(弹幕源):
         if self.能签名():
             日志.info("弹弹play：已配置 AppId（来源：%s），使用**签名验证模式**",
                       self.凭证来源)
+        elif self.app_id or self.app_secret:
+            # 只配了一半：签名要求两个都在，拿半个去签只会得到 401，不如干脆不签
+            日志.warning("弹弹play：AppId/AppSecret 只配了一半（%s/%s 要成对），"
+                        "这次按**不带鉴权**的公开请求发；AppSecret 只从环境变量或"
+                        " 数据/弹幕源.json 读，不会写进日志",
+                        环境变量_APPID, 环境变量_密钥)
         else:
             日志.info("弹弹play：没有配置 %s/%s（环境变量或 数据/弹幕源.json），"
                      "只发**不带鉴权**的公开请求（/match、/search、/comment 都是"
@@ -673,3 +679,12 @@ class 弹弹play源(弹幕源):
             if 一个.错 is None and 一个.池 is None:
                 一个.错 = 弹幕源错误("源已关闭")
             一个.事件.set()
+
+    def 诊断(self) -> dict:
+        """给界面/日志用的一份状态（**绝不包含 secret**，只说明"有没有凭证"）。"""
+        return {"标识": self.标识, "基地址": self.基地址,
+                "有凭证": self.能签名(), "凭证来源": self.凭证来源 or "无",
+                "请求次数": self.请求次数, "缓存命中次数": self.缓存命中次数,
+                "缓存目录": str(self.缓存目录), "缓存TTL秒": self.缓存TTL秒,
+                "chConvert": self.chConvert, "最小请求间隔秒": self.最小请求间隔秒,
+                "在途请求数": len(self._在途), "已关闭": self._已关闭}

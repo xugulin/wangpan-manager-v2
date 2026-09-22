@@ -142,7 +142,10 @@ class 媒体条目:
     季们: list[季] = field(default_factory=list)
     外部ID: dict[str, str] = field(default_factory=dict)   # {"tmdb": "123", "imdb": "tt…"}
     来源: str = "tmdb"
-    文件路径: Optional[Path] = None                     # 电影的实际文件；剧集为空
+    文件路径: Optional[Path] = None                     # 电影的主文件；剧集为空
+    #: 同一部作品的其它文件（多版本 1080p/4K、多段 cd1/cd2）——
+    #: 只记主文件会把"我明明有两个版本"这件事丢掉（海报墙上就看不到版本选择）
+    额外文件: list[Path] = field(default_factory=list)
     状态: str = ""                                      # 源里的 status（Released/Returning…）
     原始语言: str = ""
     制片公司: list[str] = field(default_factory=list)

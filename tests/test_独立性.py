@@ -95,7 +95,13 @@ class 独立性测试(unittest.TestCase):
                                 "tempfile", "shutil", "subprocess", "argparse",
                                 "importlib", "ast", "json", "struct", "math",
                                 "collections", "functools", "itertools", "logging",
-                                "signal", "hashlib", "zipfile", "urllib", "socket"):
+                                "signal", "hashlib", "zipfile", "urllib", "socket",
+                                # 刮削/弹幕用到的标准库（之前白名单没列全）
+                                "xml", "sqlite3", "concurrent", "base64", "io",
+                                "http", "socketserver", "datetime", "enum", "abc",
+                                "contextlib", "traceback", "warnings", "random",
+                                "unicodedata", "difflib", "statistics", "glob",
+                                "shlex", "csv"):
                             违规.append(f"{路径.name}: import {名字}")
                 elif isinstance(节点, ast.ImportFrom) and 节点.module \
                         and not getattr(节点, "level", 0):
@@ -110,6 +116,10 @@ class 独立性测试(unittest.TestCase):
                             "time", "re", "ast", "unittest", "tempfile", "shutil",
                             "subprocess", "argparse", "importlib", "logging",
                             "signal", "zipfile", "math", "random", "datetime",
-                            "enum", "abc", "contextlib", "traceback", "warnings"):
+                            "enum", "abc", "contextlib", "traceback", "warnings",
+                            # 刮削/弹幕用到的标准库（本来就是标准库，之前只是白名单没列全）
+                            "xml", "sqlite3", "concurrent", "base64", "hashlib",
+                            "urllib", "socket", "socketserver", "http", "io",
+                            "queue", "json", "re", "time", "os", "sys"):
                         违规.append(f"{路径.name}: from {节点.module}")
         self.assertEqual(sorted(set(违规)), [], "出现了计划外的第三方依赖")

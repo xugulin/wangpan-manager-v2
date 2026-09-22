@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -180,6 +181,15 @@ CREATE TABLE IF NOT EXISTS 刮削任务 (
 );
 CREATE INDEX IF NOT EXISTS 刮削任务_状态 ON 刮削任务(状态);
 """
+
+
+#: 从文件名里认清晰度/版本标签（用于"同一部作品的多版本"展示）
+_版本正则 = re.compile(r"(?<![a-zA-Z0-9])(\d{3,4}[pi]|4k|8k)(?![a-zA-Z0-9])", re.I)
+
+
+def _从文件名猜版本(文件名: str) -> str:
+    m = _版本正则.search(文件名)
+    return m.group(1).lower() if m else ""
 
 
 @dataclass
@@ -383,6 +393,11 @@ class 资料库:
         路径们: list[tuple[Path, str, int, int]] = []
         if 条目.文件路径 is not None:
             路径们.append((条目.文件路径, "", 0, 1))
+        for 额外 in getattr(条目, "额外文件", []) or []:
+            if 额外 is None or 额外 == 条目.文件路径:
+                continue
+            版本 = _从文件名猜版本(Path(额外).name)
+            路径们.append((Path(额外), 版本, 0, 0))
         for 季对象 in 条目.季们:
             for 集对象 in 季对象.集们:
                 if 集对象.文件路径 is not None:
