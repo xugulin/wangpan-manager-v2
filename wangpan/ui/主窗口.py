@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow,
                              QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from ..player.引擎 import 播放引擎, 播放状态
+from ..subtitle import (画字幕, 字幕轨道, 找同名字幕, 读字幕文件,
+                      位置底部, 位置顶部)          # noqa: F401 - 字幕（M4）
 from .视频控件 import 视频控件
 
 __all__ = ["主窗口"]
@@ -62,12 +64,16 @@ class 主窗口(QMainWindow):
         self.进度.sliderReleased.connect(self._结束拖)
         条布局.addWidget(self.进度)
         行 = QHBoxLayout()
+        self.字幕按钮 = QPushButton("💬 字幕")
+        self.字幕按钮.setToolTip("加载同名字幕 / 开关字幕显示")
+        self.字幕按钮.clicked.connect(self._切字幕)
         self.打开按钮 = QPushButton("📂 打开文件")
         self.打开按钮.clicked.connect(self._选文件)
         self.播放按钮 = QPushButton("▶ 播放")
         self.播放按钮.clicked.connect(self._切播放)
         行.addWidget(self.打开按钮)
         行.addWidget(self.播放按钮)
+        行.addWidget(self.字幕按钮)
         self.时间标签 = QLabel("00:00 / 00:00")
         行.addWidget(self.时间标签)
         行.addStretch(1)
@@ -78,6 +84,7 @@ class 主窗口(QMainWindow):
         self.音量.setFixedWidth(140)
         self.音量.valueChanged.connect(lambda v: self.引擎.设置音量(v / 100))
         行.addWidget(self.音量)
+        self.字幕按钮2 = None
         self.截图按钮 = QPushButton("📷 截图")
         self.截图按钮.clicked.connect(self._截图)
         行.addWidget(self.截图按钮)
@@ -104,6 +111,19 @@ class 主窗口(QMainWindow):
             self.状态.showMessage(f"❌ 打不开：{错}")
             return False
         self.视频.清空()
+        # M4：同名字幕自动加载（影片.chs.srt / 影片.ass 等）
+        self._字幕们: list = []
+        self._字幕序号 = -1
+        try:
+            self._字幕们 = 找同名字幕(str(路径))
+        except Exception:  # noqa: BLE001
+            self._字幕们 = []
+        if self._字幕们:
+            self._字幕序号 = 0
+            self.视频.设置字幕(self._字幕们[0], True)
+            self.状态.showMessage(f"💬 已加载字幕：{self._字幕们[0].名字}")
+        else:
+            self.视频.设置字幕(None, False)
         self.引擎.播放()
         self.播放按钮.setText("⏸ 暂停")
         self.setWindowTitle(f"网盘管理 V2 · {Path(路径).name}")
@@ -148,6 +168,33 @@ class 主窗口(QMainWindow):
         if 总 > 0:
             self.引擎.跳转(总 * self.进度.value() / 1000.0)
 
+    def _切字幕(self) -> None:
+        """有多个同名字幕就轮换；一个都没有就手动选一个；都没有就提示。"""
+        轨道们 = getattr(self, "_字幕们", []) or []
+        if not 轨道们:
+            路径, _ = QFileDialog.getOpenFileName(
+                self, "选一个字幕文件", str(Path.home()),
+                "字幕 (*.srt *.ass *.ssa *.vtt);;所有文件 (*)")
+            if not 路径:
+                return
+            try:
+                轨道 = 读字幕文件(路径)
+            except Exception as 错:  # noqa: BLE001
+                self.状态.showMessage(f"❌ 读字幕失败：{错}")
+                return
+            self._字幕们 = [轨道]
+            self._字幕序号 = 0
+        else:
+            self._字幕序号 = (self._字幕序号 + 1) % (len(轨道们) + 1)
+        if self._字幕序号 >= len(轨道们):
+            self.视频.设置字幕(None, False)
+            self.状态.showMessage("💬 已关闭字幕")
+            return
+        轨道 = 轨道们[self._字幕序号]
+        self.视频.设置字幕(轨道, True)
+        self.状态.showMessage(f"💬 字幕：{轨道.名字}"
+                          f"（{len(轨道.条目们)} 条）")
+
     def _截图(self) -> None:
         目录 = Path("数据/截图")
         目录.mkdir(parents=True, exist_ok=True)
@@ -180,6 +227,10 @@ class 主窗口(QMainWindow):
                 except Exception:  # noqa: BLE001
                     pass
         统计 = self.引擎.统计
+        try:
+            self.视频.设置当前秒(统计.当前时间秒)
+        except Exception:  # noqa: BLE001
+            pass
         if not self._拖动中 and 统计.总时长秒 > 0:
             self.进度.setValue(int(min(1.0, 统计.当前时间秒 / 统计.总时长秒) * 1000))
         self.时间标签.setText(f"{时间文本(统计.当前时间秒)} / "

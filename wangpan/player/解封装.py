@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..ffmpeg import 绑定 as B
+from ..ffmpeg.偏移 import 偏移 as 偏移表
 from ..ffmpeg.绑定 import 常量
 
 __all__ = ["流信息", "输入"]
@@ -64,6 +65,8 @@ class 输入:
     音频流: Optional[流信息] = None
     地址: str = ""
     _包指针: int = 0
+    _中断回调 = None            # 必须留引用：C 侧会一直持有这个函数指针
+    _中断查询 = None
 
     # ---------------- 打开 / 关闭 ----------------
 
@@ -95,6 +98,25 @@ class 输入:
         if 自己.视频流 is not None:
             自己.视频流.帧率 = 自己._算帧率(自己.视频流)
         return 自己
+
+    def 装中断回调(self, 该中断) -> None:
+        """挂一个"要不要中断"的查询（返回 True = 立刻中断 I/O）。
+
+        为什么必须有（实测）：网络源上 ``av_read_frame`` 可能长时间阻塞，
+        这时如果用户点停止/关窗，我们就会在"读还没返回"的时候
+        ``avformat_close_input`` —— **悬垂指针，直接段错误**。
+        官方做法是给 ``AVFormatContext.interrupt_callback`` 一个回调，
+        libavformat 在网络 I/O 的等待循环里会周期性调用它。
+        """
+        import ctypes as _c
+        类型 = _c.CFUNCTYPE(_c.c_int, _c.c_void_p)
+        self._中断查询 = 该中断
+        self._中断回调 = 类型(lambda _opaque: 1 if 该中断() else 0)
+        地址 = _c.addressof(self._中断回调)
+        # AVIOInterruptCB { int (*callback)(void*); void *opaque; }
+        基 = self.格式指针 + 偏移表["AVFormatContext.interrupt_callback"]
+        ctypes.c_void_p.from_address(基).value = _c.c_void_p(地址).value
+        ctypes.c_void_p.from_address(基 + 8).value = None
 
     def _算帧率(self, 流: 流信息) -> float:
         """优先 avg_frame_rate，退化到 r_frame_rate（0/0 要挡住）。"""

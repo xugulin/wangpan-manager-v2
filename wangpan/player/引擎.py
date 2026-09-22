@@ -31,7 +31,7 @@ from typing import Callable, Optional
 
 from ..ffmpeg import 绑定 as B
 from ..ffmpeg.绑定 import 常量
-from . import 解码
+from . import 解码, 网络
 from .音频输出 import 音频输出设备, 打开输出
 from .解封装 import 输入
 
@@ -177,9 +177,33 @@ class 播放引擎:
 
     # ---------------- 打开 / 收尾 ----------------
 
-    def 打开(self, 地址: str, 选项: Optional[dict] = None) -> None:
+    def 打开(self, 地址: str, 选项: Optional[dict] = None,
+           请求头: Optional[dict] = None) -> None:
+        """打开一路源（本地文件 / 网盘直链）。
+
+        :param 请求头: 网盘直链常要的 UA/Referer/Cookie；网络地址会自动补上
+            重连/超时/连接复用等选项（见 :func:`wangpan.player.网络.网络选项`）。
+        """
         self.停止()
-        self.输入 = 输入.打开(地址, 选项)
+        选项 = dict(选项 or {})
+        if 网络.是网络地址(地址):
+            自动 = 网络.网络选项(地址, 请求头)
+            自动.update(选项)
+            选项 = 自动
+            头 = dict(请求头 or {})
+            if 头.get("Cookie"):
+                # Cookie 不打印全文（可能含登录态），只报"带没带"
+                self._日志(f"[网络] 走网络播放：{网络.摘要(地址)}"
+                         f"（带 {len(头)} 个头，含 Cookie）")
+            else:
+                self._日志(f"[网络] 走网络播放：{网络.摘要(地址)}"
+                         + (f"（带 {len(头)} 个头）" if 头 else ""))
+        self.输入 = self._打开带降级(地址, 选项)
+        # 让网络 I/O 能被"停止"打断（否则关闭时正在读 → 悬垂指针 → 段错误）
+        try:
+            self.输入.装中断回调(lambda: self._停.is_set())
+        except Exception as 错:  # noqa: BLE001
+            self._日志(f"[网络] 中断回调没装上（不影响播放）：{错}")
         self.统计.总时长秒 = self.输入.时长秒
         self.统计.音视频 = "、".join(流.一句话() for 流 in self.输入.流们)
         self._日志(f"[播放] 已打开：{self.统计.音视频}｜时长 {self.输入.时长秒:.1f}s")
@@ -205,6 +229,33 @@ class 播放引擎:
             self.时钟 = 系统时钟()
             self.统计.音频设备 = "（这个文件没有音轨，用系统时钟）"
         self.状态 = 播放状态.暂停
+
+    def _打开带降级(self, 地址: str, 选项: dict):
+        """打开输入；网络选项太"激进"时**降级重试**。
+
+        实测（本地 HTTP/1.0 服务器）：`multiple_requests=1`（复用连接）会被
+        "回完就关连接"的服务器坑到，`avformat_open_input` 直接报"文件结束"。
+        真实网盘 CDN 也常这么干。所以策略是：
+        ① 先用完整选项（带重连/复用/超时）；
+        ② 失败就退到"最小集"（只保留请求头与超时），能播最重要；
+        ③ 两次都失败才把第一次的错误抛出去（保留最原始的诊断信息）。
+        """
+        第一次错误: Optional[Exception] = None
+        try:
+            return 输入.打开(地址, 选项 or None)
+        except Exception as 错:  # noqa: BLE001
+            第一次错误 = 错
+        if not 选项:
+            raise 第一次错误
+        最小 = {k: v for k, v in 选项.items()
+              if k in ("headers", "user_agent", "rw_timeout", "buffer_size")}
+        if 最小 == 选项:
+            raise 第一次错误
+        self._日志(f"[网络] 带完整选项打不开（{第一次错误}），改用最小选项重试")
+        try:
+            return 输入.打开(地址, 最小 or None)
+        except Exception:  # noqa: BLE001
+            raise 第一次错误
 
     def 播放(self) -> None:
         """起播（或从暂停继续）。第一次调用会拉起三个线程。"""
@@ -270,11 +321,21 @@ class 播放引擎:
             self.视频.设置输出尺寸(*self._输出尺寸)
 
     def 停止(self) -> None:
-        self._停.set()
+        self._停.set()          # 先把中断标志立起来：正在阻塞的 av_read_frame 会立刻返回
         self._暂停.clear()
+        剩下 = []
         for 线程 in list(self._线程们):
-            线程.join(timeout=1.5)
+            线程.join(timeout=3.0)
+            if 线程.is_alive():
+                剩下.append(线程.name)
         self._线程们.clear()
+        if 剩下:
+            # 宁可留着守护线程（进程退出时自然结束），也不要"读还没返回就关输入"
+            self._日志("[播放] 提示：还有线程没停干净（" + "、".join(剩下)
+                     + "），这次不强制关闭输入（避免悬垂指针崩溃）")
+            self._停.clear()
+            self.输入 = None
+            return
         self._排空队列()
         try:
             if self.输出 is not None:

@@ -35,7 +35,9 @@ from pathlib import Path
 #: 要取偏移的字段：结构体 → 字段列表
 要的字段 = {
     "AVFormatContext": ("nb_streams", "streams", "duration", "start_time",
-                       "iformat", "bit_rate", "flags", "pb"),
+                       "iformat", "bit_rate", "flags", "pb",
+                       # 中断回调：网络源读卡住时要能立刻叫停（否则停止/关窗会悬垂）
+                       "interrupt_callback", "max_delay"),
     "AVStream": ("index", "id", "codecpar", "time_base", "start_time",
                  "duration", "avg_frame_rate", "r_frame_rate", "nb_frames",
                  "disposition", "metadata"),

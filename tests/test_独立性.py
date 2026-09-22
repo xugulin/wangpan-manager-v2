@@ -97,6 +97,13 @@ class 独立性测试(unittest.TestCase):
                     根 = 节点.module.split(".")[0]
                     if 根 not in 允许前缀 and 根 not in (
                             "ctypes", "pathlib", "typing", "dataclasses", "queue",
-                            "threading", "collections", "functools", "__future__"):
+                            "threading", "collections", "functools", "__future__",
+                            # 标准库（网络/时间/编码/解析…）：不进"第三方"名单
+                            "urllib", "http", "socketserver", "socket", "resource",
+                            "struct", "base64", "hashlib", "json", "io", "os", "sys",
+                            "time", "re", "ast", "unittest", "tempfile", "shutil",
+                            "subprocess", "argparse", "importlib", "logging",
+                            "signal", "zipfile", "math", "random", "datetime",
+                            "enum", "abc", "contextlib", "traceback", "warnings"):
                         违规.append(f"{路径.name}: from {节点.module}")
         self.assertEqual(sorted(set(违规)), [], "出现了计划外的第三方依赖")

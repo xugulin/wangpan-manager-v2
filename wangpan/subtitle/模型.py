@@ -41,7 +41,7 @@ def 空样式() -> dict:
             "位置": None, "对齐": None}
 
 
-def 补全样式(样式: Optional[dict]) -> dict:
+def 补全样式(样式: Optional[dict] = None) -> dict:
     """把局部样式并到 :func:`空样式` 上（保留"字号比例"这类补充键）。"""
     结果 = 空样式()
     if 样式:
@@ -91,8 +91,10 @@ class 字幕轨道:
     def __post_init__(self) -> None:
         # 二分依赖有序：在这里排一次，别指望调用方保证 —— 解析器、手工构造、
         # 以后从容器里抽出来的内嵌轨，三条来源都得守这个规矩。
-        # 传进来的可能是元组/生成器（手工构造时很常见），先落成 list。
-        self.条目们 = list(self.条目们)
+        # 传进来的可能是元组/生成器（手工构造时很常见），先落成 list；已经是 list
+        # （含子类）就原地用，省一次几千条的拷贝。
+        if not isinstance(self.条目们, list):
+            self.条目们 = list(self.条目们)
         self.条目们.sort(key=lambda 条: 条.起始秒)      # stable：同一时刻的多条保持原顺序
         # 最长条目的时长：取() 往回找重叠字幕时的下界，见 取()
         self._最长秒 = max((条.时长秒 for 条 in self.条目们), default=0.0)
