@@ -101,7 +101,6 @@ def 造处理器(文件: Path, 记录: dict):
     return 处理器
 
 
-@unittest.skipUnless(有ffmpeg(), "需要系统 ffmpeg 造测试素材")
 class 网络播放测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

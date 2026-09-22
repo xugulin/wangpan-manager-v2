@@ -84,7 +84,6 @@ class 倍速与逐帧测试(unittest.TestCase):
         self.assertEqual(引擎.设置倍速(99.0), 4.0)
         self.assertEqual(引擎.设置倍速(0.01), 0.25)
 
-    @unittest.skipUnless(有ffmpeg(), "需要系统 ffmpeg 造测试素材")
     def test_逐帧会前进(self):
         临时 = 临时目录()
         self.addCleanup(临时.cleanup)
@@ -106,36 +105,21 @@ if __name__ == "__main__":
 
 
 class 章节与缩略图测试(unittest.TestCase):
-    """M5 剩余项：章节表读取/跳转 + 进度预览用的缩略图。"""
+    """M5 剩余项：章节表读取/跳转 + 进度预览用的缩略图（用随仓库带的小素材）。"""
 
     @classmethod
     def setUpClass(cls):
-        import subprocess
-        if not 有ffmpeg():
-            raise unittest.SkipTest("需要系统 ffmpeg")
+        from tests.公用 import 自带带章节素材, 自带素材
         cls.临时 = 临时目录()
-        基础 = Path(cls.临时.name) / "基础.mp4"
-        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-                        "-i", "testsrc2=size=320x180:rate=25:duration=6",
-                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt",
-                        "yuv420p", "-y", str(基础)], check=True, timeout=120)
-        元数据 = Path(cls.临时.name) / "章节.txt"
-        元数据.write_text(
-            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\n"
-            "title=第一章\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4000\n"
-            "title=第二章\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=4000\nEND=6000\n"
-            "title=第三章\n", encoding="utf-8")
-        cls.带章节 = Path(cls.临时.name) / "带章节.mkv"
-        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(基础),
-                        "-i", str(元数据), "-map_metadata", "1", "-map_chapters", "1",
-                        "-c", "copy", "-y", str(cls.带章节)], check=True, timeout=120)
+        cls.带章节 = 自带带章节素材()
+        cls.基础 = 自带素材(带声音=False)
 
     @classmethod
     def tearDownClass(cls):
         cls.临时.cleanup()
 
     def test_没有章节表就是空列表(self):
-        输入对象 = 输入.打开(str(Path(self.临时.name) / "基础.mp4"))
+        输入对象 = 输入.打开(str(self.基础))
         try:
             self.assertEqual(输入对象.章节们, [])
         finally:

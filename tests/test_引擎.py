@@ -10,7 +10,6 @@ from tests.公用 import 有ffmpeg, 造素材, 临时目录
 from wangpan.player.引擎 import 播放引擎, 播放状态
 
 
-@unittest.skipUnless(有ffmpeg(), "需要系统 ffmpeg 造测试素材")
 class 引擎测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

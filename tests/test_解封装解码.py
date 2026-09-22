@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from tests.公用 import 有ffmpeg, 造素材, 临时目录
+from tests.公用 import 有ffmpeg, 造素材, 临时目录  # noqa: F401
 
 from wangpan.player.解码 import 视频解码器, 音频解码器
 from wangpan.player.解封装 import 输入
 
 
-@unittest.skipUnless(有ffmpeg(), "需要系统 ffmpeg 造测试素材")
 class 解封装解码测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

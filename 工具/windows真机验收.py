@@ -43,6 +43,10 @@ def 记(文本: str) -> None:
 
 
 def 造素材(目录: Path) -> Path:
+    """验收素材：优先用仓库里带的小素材（runner 上通常没有 ffmpeg 命令）。"""
+    自带 = 项目根 / "工具" / "测试素材" / "样片.mp4"
+    if 自带.is_file():
+        return 自带
     目标 = 目录 / "验收素材.mp4"
     if 目标.is_file():
         return 目标
@@ -58,7 +62,7 @@ def 造素材(目录: Path) -> Path:
         if 子.returncode == 0 and 目标.is_file():
             return 目标
         raise SystemExit(f"造素材失败：{子.stderr[-400:]}")
-    raise SystemExit("这台机器没有 ffmpeg，无法造验收素材")
+    raise SystemExit("仓库里没有自带素材、这台机器也没有 ffmpeg，无法验收")
 
 
 class 处理器(http.server.BaseHTTPRequestHandler):
@@ -112,7 +116,7 @@ def main() -> int:
     def 播一遍(地址: str, 请求头: dict | None = None, 标题: str = "") -> dict:
         引擎 = 播放引擎(日志回调=lambda t: 记("  " + t))
         引擎.打开(地址, 请求头=请求头 or {})
-        引擎.设置输出尺寸(640, 360)
+        引擎.设置输出尺寸(320, 180)
         统计0 = dict(引擎.统计.to_dict()) if hasattr(引擎.统计, "to_dict") else {}
         引擎.播放()
         截止 = time.time() + 20
@@ -148,7 +152,7 @@ def main() -> int:
         异常.append(f"本地播放只解出 {本地['帧数']} 帧")
     if not 本地["有帧"]:
         异常.append("本地播放没有交出画面")
-    if 本地["帧尺寸"] != (640, 360):
+    if 本地["帧尺寸"] != (320, 180):
         异常.append(f"画面尺寸不对：{本地['帧尺寸']}")
     if not 本地["截图"]:
         异常.append("截图没成功")

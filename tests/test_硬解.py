@@ -28,7 +28,6 @@ def 有渲染节点() -> bool:
         "/dev/dri/renderD129")
 
 
-@unittest.skipUnless(有ffmpeg(), "需要系统 ffmpeg 造测试素材")
 class 硬解测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
