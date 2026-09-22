@@ -509,12 +509,47 @@ class TMDB客户端:
                 self._睡眠(等待)
         raise 请求失败(429, f"TMDB 限流：{路径}")        # pragma: no cover - 循环必然返回或抛出
 
+    #: 网络类错误的关键字（这些不是"Key 写错了"，而是"连不上"，提示要不一样）
+    _网络类错误 = ("Network is unreachable", "timed out", "timeout", "Connection refused",
+              "Temporary failure in name resolution", "Name or service not known",
+              "getaddrinfo", "No route to host", "Connection reset")
+
     def _包装(self, 异常: Exception, 路径: str) -> 请求失败:
-        """把任意底层异常转成脱敏的 :class:`请求失败`。"""
+        """把任意底层异常转成脱敏的 :class:`请求失败`，并**给出可操作的提示**。
+
+        为什么要专门认"网络类错误"：TMDB 的 **API 域名**在部分网络环境下连不上
+        （实测某网络把它解析到一个无关 IP，IPv4/IPv6 都超时），而**图片 CDN 却是通的**
+        —— 这时如果只报"请求失败"，用户会以为 Key 写错了，白折腾半天。
+        """
         if isinstance(异常, 请求失败):
-            return 请求失败(异常.状态码, self._脱敏(str(异常)), 异常.重试后)
+            文本 = self._脱敏(str(异常))
+            # 已经是"请求失败"也要再认一次网络关键字：底层可能先包装过一遍，
+            # 不补提示的话用户看到的还是干巴巴的 "Network is unreachable"。
+            if any(词.lower() in 文本.lower() for 词 in self._网络类错误):
+                return 请求失败(异常.状态码, 文本 + "\n" + self._连不上提示(), 异常.重试后)
+            return 请求失败(异常.状态码, 文本, 异常.重试后)
+        文本 = self._脱敏(str(异常))
+        if any(词.lower() in 文本.lower() for 词 in self._网络类错误):
+            return 请求失败(0,
+                         f"连不上 TMDB 的 API 域名（{路径}）：{文本}\n"
+                         "    这不是 Key 的问题，而是网络到不了 api.themoviedb.org。\n"
+                         "    ① 若你有代理：设环境变量 https_proxy（例如 "
+                         "export https_proxy=http://127.0.0.1:7890）后重试；\n"
+                         "    ② 图片 CDN（image.tmdb.org）与 API 是两个域名，可能只有 API 不通 —— "
+                         "此时仍可用本地 NFO/图片刮削；\n"
+                         "    ③ 自检：运行 工具/检查刮削凭据.py 会分别报两个域名的连通性。")
         return 请求失败(int(getattr(异常, "code", 0) or 0),
-                     f"TMDB 请求失败（{路径}）：{self._脱敏(str(异常))}")
+                     f"TMDB 请求失败（{路径}）：{文本}")
+
+    @staticmethod
+    def _连不上提示() -> str:
+        """连不上 API 时的统一提示（图片 CDN 与 API 是两个域名，这点最容易误判）。"""
+        return ("    这不是 Key 的问题，而是网络到不了 api.themoviedb.org。\n"
+                "    ① 若你有代理：设环境变量 https_proxy（例如 "
+                "export https_proxy=http://127.0.0.1:7890）后重试；\n"
+                "    ② 图片 CDN（image.tmdb.org）与 API 是两个域名，可能只有 API 不通 —— "
+                "此时仍可用本地 NFO/图片刮削；\n"
+                "    ③ 自检：运行 工具/检查刮削凭据.py 会分别报两个域名的连通性。")
 
     def _脱敏(self, 文本: str) -> str:
         """把 token/api_key 从任何要打日志或抛异常的文本里抹掉（配置里也不许出现明文）。"""
