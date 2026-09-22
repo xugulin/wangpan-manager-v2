@@ -70,7 +70,11 @@ class 独立性测试(unittest.TestCase):
         站点 = list((venv / "lib").glob("python3*/site-packages")) + \
             list((venv / "Lib").glob("site-packages"))
         self.assertTrue(站点, "venv 里没有 site-packages")
-        self.assertIn("网盘管理_V2", str(站点[0].resolve()))
+        # 判据是"在项目根下面"，不是"目录名必须是中文" —— CI 上的检出目录叫
+        # wangpan-manager-v2（Windows runner 实测），写死中文名会误报。
+        self.assertEqual(站点[0].resolve(), (venv / 站点[0].relative_to(venv)).resolve())
+        self.assertTrue(str(站点[0].resolve()).startswith(str(项目根.resolve())),
+                        f"site-packages 不在项目里：{站点[0]}")
         self.assertTrue((站点[0] / "PySide6").is_dir(), "PySide6 要装在 V2 自己的 venv 里")
 
     def test_只有标准库与PySide6(self):

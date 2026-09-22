@@ -56,10 +56,12 @@ class 记录本测试(unittest.TestCase):
 
     def test_最近排序(self):
         本 = self.本
+        # ⚠️ 标识是"绝对路径"：Windows 上 /新.mp4 会变成 D:\新.mp4，
+        #    所以断言要用 记录本.标识() 自己算一遍（别写死平台相关的字符串）
         本.记位置("/旧.mp4", 10, 100)
         time.sleep(0.01)
         本.记位置("/新.mp4", 10, 100)
-        self.assertEqual(本.最近(1)[0].标识, "/新.mp4")
+        self.assertEqual(本.最近(1)[0].标识, 记录本.标识("/新.mp4"))
 
 
 class 倍速与逐帧测试(unittest.TestCase):
