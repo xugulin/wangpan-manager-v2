@@ -90,6 +90,7 @@ class 音频时钟:
         self.采样率 = 采样率
         self._基准秒 = 0.0          # 这一段的起点（跳转会重置）
         self._样本 = 0
+        self._起点时刻 = time.monotonic()
         self._锁 = threading.Lock()
         self.暂停中 = False
         self._暂停时刻 = 0.0
@@ -103,6 +104,7 @@ class 音频时钟:
             self._基准秒 = float(起点秒)
             self.倍速 = max(0.1, min(8.0, float(倍速 or 1.0)))
             self._样本 = 0
+            self._起点时刻 = time.monotonic()
 
     #: 倍速（>1 快放）。音频是"按原速重采样后以倍速写出去"，
     #: 所以时钟要用同一个倍速折算 —— 否则画面会比声音慢/快（实测过）。
@@ -110,7 +112,11 @@ class 音频时钟:
 
     def 现在秒(self, 设备延迟: float = 0.0) -> float:
         with self._锁:
-            return (self._基准秒 + self._样本 / self.采样率 * self.倍速
+            按样本 = self._样本 / self.采样率 * self.倍速
+            # 护栏：音频时钟**不许超过真实经过的时间**（设备异常/不阻塞时兜底，
+            # 否则时钟会瞬间冲到片尾，视频永远等不到自己的时刻）
+            按时间 = (time.monotonic() - self._起点时刻) * self.倍速
+            return (self._基准秒 + min(按样本, 按时间 + 0.5)
                     - max(0.0, 设备延迟) * self.倍速)
 
 

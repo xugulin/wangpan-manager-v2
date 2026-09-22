@@ -122,6 +122,35 @@ class 引擎测试(unittest.TestCase):
                            "没音轨时也要出画面（系统时钟）")
         self.assertGreater(引擎.时钟.现在秒(), 0.5, "系统时钟要走起来")
 
+    def test_空输出也按真实时间走(self):
+        """没有声卡（Windows CI / 服务器）时空输出必须按真实时间阻塞。
+
+        这是 Windows CI 上抓到的真 bug：空输出的"写"立刻返回 → 音频线程几毫秒
+        "写"完整个文件 → 音频时钟瞬间冲到片尾 → 视频永远等不到自己的时刻 →
+        **25 帧的片子只出 1 帧**。修法是空输出按样本 sleep + 音频时钟加真实时间护栏。
+        """
+        import os as _os
+        旧 = _os.environ.get("V2_音频后端")
+        _os.environ["V2_音频后端"] = "空"
+        try:
+            引擎 = 播放引擎(日志回调=self._日志行.append)
+            self.addCleanup(引擎.停止)
+            引擎.打开(str(self.素材))
+            self.assertIsInstance(引擎.输出, type(引擎.输出))
+            self.assertIn("空输出", 引擎.输出.名字)
+            引擎.播放()
+            time.sleep(1.0)
+            进度 = 引擎.时钟.现在秒()
+            self.assertLess(进度, 1.6, f"空输出下时钟不该冲到片尾（现在 {进度:.2f}s）")
+            self.assertGreater(进度, 0.6, f"时钟要走（现在 {进度:.2f}s）")
+            self.assertGreater(引擎.统计.已解视频帧, 10,
+                               "空输出下也要正常出画面（Windows 走的就是这条路）")
+        finally:
+            if 旧 is None:
+                _os.environ.pop("V2_音频后端", None)
+            else:
+                _os.environ["V2_音频后端"] = 旧
+
     def test_音量缩放(self):
         引擎 = self._起播()
         原始 = b"\x00\x40" * 10          # 16384 的 S16 样本，10 个
