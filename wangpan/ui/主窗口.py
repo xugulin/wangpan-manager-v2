@@ -15,7 +15,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
                              QMainWindow, QPushButton, QSlider, QTabWidget,
                              QVBoxLayout, QWidget)
 
@@ -43,6 +43,9 @@ class 主窗口(QMainWindow):
         self.setWindowTitle("网盘管理 V2 · 自研播放内核")
         self.resize(1100, 680)
         self.引擎 = 播放引擎(日志回调=self._写日志)
+        # ---- 弹幕控制器（引擎每帧推进；视频控件负责画）----
+        from ..danmaku.引擎 import 弹幕控制器
+        self.弹幕 = 弹幕控制器(日志回调=self._写日志)
         self.记录本 = 记录本()
         self.列表: list[str] = []          # 播放列表（本地文件或直链）
         self.列表序号 = -1
@@ -51,6 +54,7 @@ class 主窗口(QMainWindow):
         self._日志行: list[str] = []
 
         self.视频 = 视频控件()
+        self.视频.设置弹幕控制器(self.弹幕)      # 弹幕画在画面之上（视频控件负责绘制）
         self.视频.双击.connect(self._切全屏)
         self.视频.单击.connect(self._切播放)
 
@@ -85,6 +89,18 @@ class 主窗口(QMainWindow):
         self.进度.sliderMoved.connect(self._要预览)
         条布局.addWidget(self.进度)
         行 = QHBoxLayout()
+        self.弹幕按钮 = QPushButton("🗨 弹幕")
+        self.弹幕按钮.setCheckable(True)
+        self.弹幕按钮.setChecked(True)
+        self.弹幕按钮.setToolTip("开关弹幕（右键：时间轴偏移 / 透明度）")
+        self.弹幕按钮.clicked.connect(self._切弹幕)
+        self.弹幕按钮.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.弹幕按钮.customContextMenuRequested.connect(self._弹幕菜单)
+        行.addWidget(self.弹幕按钮)
+        self.找弹幕按钮 = QPushButton("⬇ 找弹幕")
+        self.找弹幕按钮.setToolTip("按文件名到弹弹play 找这一集的弹幕（需要 AppId；见 数据/弹幕源.json）")
+        self.找弹幕按钮.clicked.connect(self._装载弹幕)
+        行.addWidget(self.找弹幕按钮)
         self.字幕按钮 = QPushButton("💬 字幕")
         self.字幕按钮.setToolTip("加载同名字幕 / 开关字幕显示")
         self.字幕按钮.clicked.connect(self._切字幕)
@@ -146,6 +162,21 @@ class 主窗口(QMainWindow):
         self.标签 = QTabWidget()
         self.标签.addTab(播放页, "▶ 播放")
         self.标签.addTab(self.网盘页, "☁ 网盘")
+        # ---- 媒体库（海报墙）：起不来也不能连累播放 ----
+        try:
+            from ..scrape.库 import 资料库
+            from ..scrape.图片 import 图片缓存
+            from .海报墙页 import 海报墙页
+            self.资料库 = 资料库()
+            self.图片缓存 = 图片缓存()
+            self.海报墙 = 海报墙页(self.资料库, self.图片缓存)
+            self.海报墙.要播放.connect(self._播放库里的文件)
+            self.海报墙.要刮削.connect(self._刮削路径)
+            self.标签.addTab(self.海报墙, "🎞 媒体库")
+        except Exception as 错:  # noqa: BLE001
+            self.资料库 = None
+            self.海报墙 = None
+            self._写日志(f"[媒体库] 初始化失败（不影响播放）：{错}")
         self.setCentralWidget(self.标签)
 
         self.状态 = self.statusBar()
@@ -186,6 +217,15 @@ class 主窗口(QMainWindow):
         self.引擎.播放()
         self.播放按钮.setText("⏸ 暂停")
         self._装章节(str(路径))
+        # 自动加载"同目录同名弹幕文件"（本地优先，不联网）
+        try:
+            from ..danmaku.源.本地 import 读同名字幕弹幕
+            本地弹幕 = 读同名字幕弹幕(Path(路径))
+            if 本地弹幕 is not None and len(本地弹幕):
+                self.弹幕.装载本地(本地弹幕, "本地同名")
+                self.状态.showMessage(f"🗨 已加载本地弹幕 {len(本地弹幕)} 条")
+        except Exception:  # noqa: BLE001
+            pass
         # M5：记住"看过哪儿"，下次接着播
         try:
             时长 = self.引擎.统计.总时长秒
@@ -380,6 +420,148 @@ class 主窗口(QMainWindow):
         self.预览.setText("")
         self.状态.showMessage(f"预览 {时间文本(秒)}")
 
+    # ---------------- 弹幕 ----------------
+
+    def _切弹幕(self) -> None:
+        self.弹幕.设置显示(self.弹幕按钮.isChecked())
+        self.状态.showMessage("🗨 弹幕：" + ("开" if self.弹幕.显示中 else "关")
+                          + ("｜" + self.弹幕.摘要() if self.弹幕.有弹幕 else ""))
+
+    def _弹幕菜单(self) -> None:
+        """右键弹幕按钮：调时间轴偏移 / 透明度（弹幕跟画面对不上时最常用）。"""
+        from PySide6.QtWidgets import QInputDialog
+        偏移, 好 = QInputDialog.getInt(
+            self, "弹幕时间轴偏移", "弹幕相对视频平移（毫秒，负数=弹幕提前）：",
+            self.弹幕.时间轴偏移, -30000, 30000, 100)
+        if 好:
+            self.弹幕.设置时间轴偏移(偏移)
+            self.状态.showMessage(f"🗨 弹幕偏移 {偏移:+d} ms")
+            return
+        透明, 好 = QInputDialog.getInt(self, "弹幕不透明度", "10–100：",
+                                  int(self.弹幕.配置.不透明度 * 100), 10, 100, 5)
+        if 好:
+            self.弹幕.配置 = self.弹幕.配置.复制(不透明度=透明 / 100.0)
+            self.弹幕.渲染器.设置配置(self.弹幕.配置)
+            self.状态.showMessage(f"🗨 弹幕不透明度 {透明}%")
+
+    def _装载弹幕(self) -> None:
+        """按当前正在播的文件名到弹弹play 找弹幕（找不到就给候选让人选）。"""
+        if self.引擎.输入 is None:
+            self.状态.showMessage("先播一个片子，再点「找弹幕」")
+            return
+        from ..danmaku.源 import 建默认源
+        from ..danmaku.源.接口 import 素材信息
+        地址 = str(self.引擎.输入.地址)
+        素材 = 素材信息(路径=Path(地址) if Path(地址).is_file() else None,
+                    文件名=Path(地址).name, 时长秒=self.引擎.统计.总时长秒)
+        self.状态.showMessage("🗨 正在找弹幕…")
+        应用 = QApplication.instance()
+        if 应用 is not None:
+            应用.processEvents()
+        结果 = self.弹幕.装载(素材, 建默认源())
+        if 结果.成功:
+            self.状态.showMessage(f"🗨 已装载 {结果.条数} 条（{结果.来源}）")
+            return
+        if 结果.候选们:
+            from PySide6.QtWidgets import QInputDialog
+            名字们 = [c.可读() for c in 结果.候选们[:12]]
+            选, 好 = QInputDialog.getItem(self, "选择匹配的节目",
+                                       "没把握自动选，帮你列出来（分数越高越像）：",
+                                       名字们, 0, False)
+            if 好 and 选:
+                采纳 = 结果.候选们[名字们.index(选)]
+                池 = None
+                for 源 in 建默认源():
+                    try:
+                        if 源.能匹配():
+                            池 = 源.取弹幕(采纳.标识)
+                            if 池 is not None and len(池):
+                                break
+                    except Exception:  # noqa: BLE001
+                        continue
+                if 池 is not None and len(池):
+                    self.弹幕.装载本地(池, 采纳.标题 or "在线")
+                    self.状态.showMessage(f"🗨 已装载 {len(池)} 条（{采纳.标题}）")
+                    return
+        self.状态.showMessage(f"🗨 {结果.说明 or '没找到弹幕'}")
+
+    def _刮削路径(self, 路径: str) -> None:
+        """刮一个目录/文件：在**后台线程**里跑，界面只显示进度（别卡住 UI）。
+
+        为什么用线程 + 进度框：刮削要联网、要下图，几秒钟到几分钟都有可能；
+        放在界面线程里会整个卡死（我们字幕/截图都踩过"界面线程里干重活"的坑）。
+        """
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from ..scrape.库 import 资料库
+        from ..scrape.图片 import 图片缓存
+        from ..scrape.服务 import 刮削服务, 刮削设置
+        from ..scrape.tmdb import TMDB客户端, TMDB配置
+        if getattr(self, "资料库", None) is None:
+            return
+        客户端 = None
+        try:
+            配置 = TMDB配置.从环境与配置()
+            if 配置.token or 配置.api_key:
+                客户端 = TMDB客户端(配置)
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[刮削] TMDB 客户端初始化失败：{错}")
+        if 客户端 is None:
+            QMessageBox.information(
+                self, "还没有配置 TMDB",
+                "刮削需要 TMDB 的 API Key（免费）：\n\n"
+                "1. 到 https://www.themoviedb.org/settings/api 申请；\n"
+                "2. 把 token 写进 数据/刮削.json（{\"tmdb\": {\"token\": \"…\"}}），\n"
+                "   或设环境变量 V2_TMDB_TOKEN。\n\n"
+                "没配置也能用：扫描 + 本地 NFO/图片仍然会入库。")
+        进度框 = QProgressDialog("正在扫描…", "取消", 0, 0, self)
+        进度框.setWindowTitle("刮削中")
+        进度框.setMinimumDuration(0)
+        进度框.show()
+        结果盒: dict = {}
+
+        class 干活(QThread):
+            def run(自己):
+                try:
+                    库 = 资料库()
+                    缓存 = 图片缓存()
+                    服务 = 刮削服务(
+                        库, 客户端, 缓存, 刮削设置(),
+                        进度回调=lambda p: 结果盒.setdefault("进度", p.摘要()),
+                        日志回调=self._写日志)
+                    服务.扫库([路径])
+                    结果盒["结果"] = 服务.续跑()
+                    结果盒["统计"] = 库.统计().摘要()
+                    服务.关闭()
+                    库.关闭()
+                except Exception as 错:  # noqa: BLE001
+                    结果盒["错误"] = str(错)
+
+        线程 = 干活(self)
+        self._刮削线程 = 线程
+        定时 = QTimer(self)
+        定时.setInterval(400)
+        定时.timeout.connect(lambda: 进度框.setLabelText(
+            str(结果盒.get("进度") or "正在扫描…")))
+        定时.start()
+        进度框.canceled.connect(lambda: self._写日志("[刮削] 用户取消（本批跑完会停）"))
+
+        def 收尾():
+            定时.stop()
+            进度框.close()
+            if self.海报墙 is not None:
+                self.海报墙.刷新()
+            结果 = 结果盒.get("结果")
+            self.状态.showMessage("🎞 刮削完成：" + (结果.摘要() if 结果 else
+                                              str(结果盒.get("错误") or "无结果"))
+                             + f"｜{结果盒.get('统计', '')}")
+        线程.finished.connect(收尾)
+        线程.start()
+
+    def _播放库里的文件(self, 路径: str) -> None:
+        self.标签.setCurrentIndex(0)
+        self.打开(路径)
+
     def _截图(self) -> None:
         目录 = Path("数据/截图")
         目录.mkdir(parents=True, exist_ok=True)
@@ -429,6 +611,13 @@ class 主窗口(QMainWindow):
             self.视频.设置当前秒(统计.当前时间秒)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            区域 = self.视频.目标矩形()
+            if 区域.width() > 8 and 区域.height() > 8:
+                self.弹幕.推进(统计.当前时间秒 * 1000.0,
+                            区域.width(), 区域.height())
+        except Exception:  # noqa: BLE001
+            pass
         if not self._拖动中 and 统计.总时长秒 > 0:
             self.进度.setValue(int(min(1.0, 统计.当前时间秒 / 统计.总时长秒) * 1000))
         self.时间标签.setText(f"{时间文本(统计.当前时间秒)} / "
@@ -476,6 +665,11 @@ class 主窗口(QMainWindow):
             pass
         try:
             self.网盘页.关闭()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self.资料库 is not None:
+                self.资料库.关闭()
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(事件)

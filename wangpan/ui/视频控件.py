@@ -98,6 +98,30 @@ class 视频控件(QWidget):
             画.drawImage(self.目标矩形(), self._图)
         画.end()
         self._画字幕层()
+        self._画弹幕层()
+
+    def 设置弹幕控制器(self, 控制器) -> None:
+        """接上弹幕控制器（引擎侧每帧推进；这里只负责画）。"""
+        self._弹幕 = 控制器
+
+    def _画弹幕层(self) -> None:
+        """画弹幕：**位置由引擎按当前时间算**，这里只把结果贴出来。
+
+        画在"视频区域"而不是整个控件：黑边里飘弹幕看着很奇怪。
+        """
+        控制器 = getattr(self, "_弹幕", None)
+        if 控制器 is None or not getattr(控制器, "显示中", False):
+            return
+        区域 = self.目标矩形()
+        if 区域.width() <= 8 or 区域.height() <= 8:
+            return
+        画 = QPainter(self)
+        画.setClipRect(区域)
+        画.translate(区域.x(), 区域.y())
+        try:
+            控制器.绘制(画, 区域.width(), 区域.height())
+        finally:
+            画.end()
 
     def _画字幕层(self) -> None:
         """画面画完之后**另起一个** QPainter 画字幕。

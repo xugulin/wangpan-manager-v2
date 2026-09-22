@@ -500,15 +500,31 @@ class 弹弹play源(弹幕源):
         if 参数:
             地址 += "?" + urllib.parse.urlencode({k: str(v) for k, v in 参数.items()})
         数据 = None
+        头 = self._头(路径)
         if 体 is not None:
             数据 = json.dumps(体, ensure_ascii=False).encode("utf-8")
+            # ⚠️ 有请求体就必须声明 Content-Type：不然服务端直接回 **HTTP 415**
+            #    （真机联调时踩到过：不带这个头，/api/v2/match 一律 415）。
+            头["Content-Type"] = "application/json; charset=utf-8"
         self._节流()
         self.请求次数 += 1
-        应答 = self.传输(请求(方法=方法, 地址=地址, 头=self._头(路径),
+        应答 = self.传输(请求(方法=方法, 地址=地址, 头=头,
                             体=数据, 超时=self.超时秒))
         if int(应答.状态码) != 200:
-            raise 弹幕源错误(f"{方法} {纯接口路径(路径)} 返回 HTTP {应答.状态码}："
-                           f"{应答.文本()[:200]}")
+            提示 = str((应答.头 or {}).get("X-Error-Message")
+                     or (应答.头 or {}).get("x-error-message") or "")
+            if int(应答.状态码) == 403 and "Authentication" in 提示:
+                # 真机实测（2026）：**连 /match 也要求 AppId/签名**，不再是"完全公开"。
+                # 这条提示要能直接告诉用户怎么办，而不是甩一个 403。
+                raise 弹幕源错误(
+                    "弹弹play 要求应用鉴权（" + 提示 + "）：请到 "
+                    "https://dev.dandanplay.com 申请 AppId/AppSecret，"
+                    "写进 数据/弹幕源.json（{\"dandanplay\": {\"appId\": \"…\", "
+                    "\"appSecret\": \"…\"}}）或设环境变量 "
+                    "V2_DANDANPLAY_APP_ID / V2_DANDANPLAY_APP_SECRET")
+            raise 弹幕源错误(f"{方法} {纯接口路径(路径)} 返回 HTTP {应答.状态码}"
+                           + (f"（{提示}）" if 提示 else "")
+                           + f"：{应答.文本()[:200]}")
         try:
             响应体 = json.loads(应答.文本() or "{}")
         except ValueError as 错:
