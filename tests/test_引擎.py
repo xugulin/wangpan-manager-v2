@@ -151,6 +151,25 @@ class 引擎测试(unittest.TestCase):
             else:
                 _os.environ["V2_音频后端"] = 旧
 
+    def test_截图会自动建目录(self):
+        """QImage.save 失败是静默的：目录不存在时只返回 False。
+
+        全新检出的仓库里没有 数据/ 目录，Windows CI 上验收脚本就因此报
+        "截图没成功"（画面明明有）。所以截图必须先建目录，失败了还要说原因。
+        """
+        from pathlib import Path as _Path
+        引擎 = self._起播()
+        截止 = time.time() + 6.0
+        while time.time() < 截止 and 引擎.取最新帧() is None:
+            time.sleep(0.05)
+        目标 = _Path(self.临时.name) / "没有这个目录" / "更里面" / "截图.png"
+        if 目标.parent.exists():
+            import shutil
+            shutil.rmtree(目标.parent)
+        self.assertTrue(引擎.截图(str(目标)), "有画面时截图必须成功（哪怕目录不存在）")
+        self.assertTrue(目标.is_file())
+        self.assertGreater(目标.stat().st_size, 500)
+
     def test_音量缩放(self):
         引擎 = self._起播()
         原始 = b"\x00\x40" * 10          # 16384 的 S16 样本，10 个

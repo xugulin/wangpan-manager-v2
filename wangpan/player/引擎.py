@@ -27,6 +27,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 from ..ffmpeg import 绑定 as B
@@ -745,12 +746,23 @@ class 播放引擎:
         return True
 
     def 截图(self, 路径: str) -> bool:
-        """把当前帧存成 PNG（画面是我们自己的数据，截图不需要问播放器）。"""
+        """把当前帧存成 PNG（画面是我们自己的数据，截图不需要问播放器）。
+
+        ⚠️ 目录不存在要先建出来：`QImage.save` 失败是**静默**的（只返回 False），
+        在全新检出的目录里"截图没成功"就是这么来的（Windows CI 实测）。
+        """
         帧 = self.取最新帧()
         if 帧 is None:
             return False
         try:
+            目标 = Path(路径)
+            if 目标.parent and not 目标.parent.exists():
+                目标.parent.mkdir(parents=True, exist_ok=True)
             图 = 帧.转QImage()
-            return bool(图.save(str(路径)))
-        except Exception:  # noqa: BLE001
+            好 = bool(图.save(str(目标)))
+            if not 好:
+                self._日志(f"[播放] 截图保存失败（{目标}）：检查目录权限/路径")
+            return 好
+        except Exception as 错:  # noqa: BLE001
+            self._日志(f"[播放] 截图异常：{错}")
             return False
