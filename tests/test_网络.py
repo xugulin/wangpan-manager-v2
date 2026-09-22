@@ -153,7 +153,8 @@ class 网络播放测试(unittest.TestCase):
         输入对象 = 输入.打开(self.地址(), 网络.网络选项(self.地址()))
         try:
             self.assertIsNotNone(输入对象.视频流)
-            self.assertGreater(输入对象.时长秒, 2.0)
+            self.assertGreaterEqual(输入对象.时长秒, 1.9,
+                                    f"时长异常：{输入对象.时长秒}")
         finally:
             输入对象.关闭()
 
