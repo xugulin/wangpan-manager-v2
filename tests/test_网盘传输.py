@@ -216,3 +216,107 @@ class 传输引擎测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 分段下载测试(unittest.TestCase):
+    """多段并发下载：服务器支持 Range 时并发；不支持时自动退化单线程。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.临时 = 临时目录()
+        cls.目录 = Path(cls.临时.name) / "源"
+        cls.目录.mkdir(parents=True, exist_ok=True)
+        # 8 MB 内容，每个字节都不一样，方便校验"拼出来的文件是不是对的"
+        cls.内容 = bytes((i * 7 + (i >> 8)) % 251 for i in range(0, 8 * 1024 * 1024))
+        (cls.目录 / "大文件.bin").write_bytes(cls.内容)
+        cls.记录: list = []
+
+        # ⚠️ 标准库的 SimpleHTTPRequestHandler **不认 Range**（回 200 整份），
+        #    拿它测分段等于没测。这里自己实现 206 + Content-Range。
+        class 处理器(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_a):
+                return
+
+            def do_GET(self):                    # noqa: N802
+                范围 = self.headers.get("Range")
+                cls.记录.append(范围)
+                数据 = cls.内容
+                大小 = len(数据)
+                起, 止 = 0, 大小 - 1
+                部分 = bool(范围 and 范围.startswith("bytes="))
+                if 部分:
+                    片段 = 范围[6:].split("-")
+                    起 = int(片段[0]) if 片段[0] else 0
+                    止 = int(片段[1]) if len(片段) > 1 and 片段[1] else 大小 - 1
+                    止 = min(止, 大小 - 1)
+                块 = 数据[起:止 + 1]
+                self.send_response(206 if 部分 else 200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(len(块)))
+                if 部分:
+                    self.send_header("Content-Range", f"bytes {起}-{止}/{大小}")
+                self.end_headers()
+                try:
+                    self.wfile.write(块)
+                except OSError:
+                    return
+
+        def 建(*a, **k):
+            # 我们这个处理器自己管数据（BaseHTTPRequestHandler 不认 directory=）
+            k.pop("directory", None)
+            return 处理器(*a, **k)
+
+        cls.服务器 = socketserver.ThreadingTCPServer(("127.0.0.1", 0), 建)
+        cls.服务器.daemon_threads = True
+        cls.端口 = cls.服务器.server_address[1]
+        threading.Thread(target=cls.服务器.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.服务器.shutdown()
+        cls.服务器.server_close()
+        cls.临时.cleanup()
+
+    def test_探测分段支持(self):
+        from wangpan.transfer.分段 import 探测分段支持
+        支持, 大小 = 探测分段支持(f"http://127.0.0.1:{self.端口}/大文件.bin")
+        self.assertEqual(大小, len(self.内容))
+        self.assertTrue(支持, "这个测试服务器支持 Range，必须探测出来")
+
+    def test_分段下载内容完全一致(self):
+        from wangpan.transfer.分段 import 分段下载
+        落点 = Path(self.临时.name) / "出" / "大文件.bin"
+        self.记录.clear()
+        分段下载(f"http://127.0.0.1:{self.端口}/大文件.bin", 落点, 段数=4)
+        self.assertEqual(落点.stat().st_size, len(self.内容))
+        self.assertEqual(落点.read_bytes(), self.内容, "拼出来的内容必须逐字节一致")
+        self.assertFalse(落点.with_suffix(落点.suffix + ".部分").exists())
+        # 真的分了 4 段（每段一个 Range 请求，而不是退化成一个整份请求）
+        段请求 = [r for r in self.记录 if r and r.startswith("bytes=") and "-" in r
+                and not r.endswith("-0")]
+        self.assertGreaterEqual(len(段请求), 4, f"应该发出多段 Range 请求：{self.记录}")
+
+    def test_进度回调单调递增(self):
+        from wangpan.transfer.分段 import 分段下载
+        落点 = Path(self.临时.name) / "出2" / "大文件.bin"
+        进度: list = []
+        分段下载(f"http://127.0.0.1:{self.端口}/大文件.bin", 落点, 段数=4,
+              进度回调=lambda 已, 总: 进度.append(已))
+        self.assertGreater(len(进度), 3)
+        self.assertEqual(进度, sorted(进度), "进度不能倒退")
+        self.assertEqual(进度[-1], len(self.内容))
+
+    def test_引擎走分段并完成(self):
+        表 = 注册表()
+        表.注册(HTTP适配器(f"http://127.0.0.1:{self.端口}/大文件.bin"), "http")
+        引擎 = 传输引擎(表, 并发=1)
+        self.addCleanup(引擎.关闭)
+        落点 = Path(self.临时.name) / "出3" / "大文件.bin"
+        任务 = 引擎.加下载("http", f"http://127.0.0.1:{self.端口}/大文件.bin", 落点,
+                        名字="大文件.bin", 总字节=len(self.内容))
+        self.assertTrue(引擎.等待全部(60))
+        self.assertEqual(任务.状态, 状态.完成)
+        self.assertEqual(落点.read_bytes(), self.内容)
