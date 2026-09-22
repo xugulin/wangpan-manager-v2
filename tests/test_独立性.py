@@ -66,7 +66,9 @@ class 独立性测试(unittest.TestCase):
         """
         venv = 项目根 / "运行环境" / "venv"
         self.assertTrue((venv / "pyvenv.cfg").is_file(), "V2 应该有自己的一份 venv")
-        站点 = list((venv / "lib").glob("python3*/site-packages"))
+        # venv 布局两端不同：Linux 是 lib/python3.x/site-packages，Windows 是 Lib/site-packages
+        站点 = list((venv / "lib").glob("python3*/site-packages")) + \
+            list((venv / "Lib").glob("site-packages"))
         self.assertTrue(站点, "venv 里没有 site-packages")
         self.assertIn("网盘管理_V2", str(站点[0].resolve()))
         self.assertTrue((站点[0] / "PySide6").is_dir(), "PySide6 要装在 V2 自己的 venv 里")

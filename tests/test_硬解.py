@@ -9,9 +9,13 @@
 from __future__ import annotations
 
 import os
-import resource
 import time
 import unittest
+
+try:                        # resource 是 Unix 专有（Windows 上没有这个模块）
+    import resource
+except ImportError:         # pragma: no cover - Windows
+    resource = None         # type: ignore[assignment]
 
 from tests.公用 import 有ffmpeg, 造素材, 临时目录
 
@@ -47,7 +51,8 @@ class 硬解测试(unittest.TestCase):
             解码器.设置输出尺寸(*输出)
             解码器.打开()
             帧数 = 0
-            cpu0 = resource.getrusage(resource.RUSAGE_SELF)
+            cpu0 = (resource.getrusage(resource.RUSAGE_SELF)
+                    if resource is not None else None)
             try:
                 while True:
                     包 = 输入对象.读包()
@@ -69,13 +74,15 @@ class 硬解测试(unittest.TestCase):
                     if 包 is None:
                         break
             finally:
-                cpu1 = resource.getrusage(resource.RUSAGE_SELF)
+                cpu1 = (resource.getrusage(resource.RUSAGE_SELF)
+                        if resource is not None else None)
                 解码器.关()
                 输入对象.关闭()
             return {"帧数": 帧数, "尺寸": 尺寸, "硬解": 解码器.硬解,
                     "硬解帧": 解码器.硬解帧数,
-                    "cpu秒": (cpu1.ru_utime + cpu1.ru_stime)
-                    - (cpu0.ru_utime + cpu0.ru_stime)}
+                    "cpu秒": ((cpu1.ru_utime + cpu1.ru_stime)
+                            - (cpu0.ru_utime + cpu0.ru_stime)
+                            if (cpu0 is not None and cpu1 is not None) else 0.0)}
         finally:
             if 旧 is None:
                 os.environ.pop("V2_不要硬解", None)

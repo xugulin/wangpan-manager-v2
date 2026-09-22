@@ -132,8 +132,9 @@ class 令牌测试(unittest.TestCase):
         self.assertEqual(新仓.刷新令牌, "刷新A")
         self.assertEqual(新仓.用户标识, "用户1")
         self.assertTrue(新仓.有效())
-        self.assertEqual(oct(self.路径.stat().st_mode)[-3:], "600",
-                         "令牌是凭据，权限要收紧")
+        if os.name != "nt":       # Windows 没有 POSIX 权限位，这条只在 Linux 上成立
+            self.assertEqual(oct(self.路径.stat().st_mode)[-3:], "600",
+                             "令牌是凭据，权限要收紧")
 
     def test_快过期会去刷新(self):
         仓 = 光鸭令牌(self.路径)
