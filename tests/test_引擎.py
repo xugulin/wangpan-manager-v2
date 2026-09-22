@@ -20,8 +20,30 @@ class 引擎测试(unittest.TestCase):
     def tearDownClass(cls):
         cls.临时.cleanup()
 
+    def setUp(self):
+        # 把引擎日志收下来：测试失败时打印出来 —— 否则"为什么不出画面"全靠猜
+        # （Windows CI 上第一次跑就吃了这个亏：只看到"帧数=1"，看不到原因）
+        self._日志行: list[str] = []
+
+    def tearDown(self):
+        """测试失败时把引擎日志打出来（"为什么不出画面"不能靠猜）。"""
+        失败 = False
+        try:
+            结果 = getattr(self, "_outcome", None)
+            for 属性 in ("errors", "failures"):
+                for 项 in (getattr(结果, 属性, None) or []):
+                    if len(项) >= 2 and 项[1]:
+                        失败 = True
+        except Exception:  # noqa: BLE001 - 打印日志这件事本身绝不能把测试搞挂
+            失败 = False
+        if 失败 or not self._日志行:
+            print("\n---- 引擎日志（最后 30 行）----")
+            for 行 in self._日志行[-30:]:
+                print("  " + 行)
+            print("---- 日志结束 ----")
+
     def _起播(self):
-        引擎 = 播放引擎()
+        引擎 = 播放引擎(日志回调=self._日志行.append)
         self.addCleanup(引擎.停止)
         引擎.打开(str(self.素材))
         引擎.播放()

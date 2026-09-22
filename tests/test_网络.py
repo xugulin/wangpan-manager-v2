@@ -188,14 +188,16 @@ class 网络播放测试(unittest.TestCase):
         self.assertGreater(len(self.记录.get("range") or []), 前 - 1)
 
     def test_引擎能网络起播并出画面(self):
-        引擎 = 播放引擎()
+        日志行: list[str] = []
+        引擎 = 播放引擎(日志回调=日志行.append)
         self.addCleanup(引擎.停止)
         引擎.打开(self.地址(), 请求头={"Referer": "https://pan.example.com/"})
         引擎.播放()
         截止 = time.time() + 8.0
         while time.time() < 截止 and 引擎.统计.已解视频帧 < 10:
             time.sleep(0.05)
-        self.assertGreater(引擎.统计.已解视频帧, 9, "网络源要能持续出帧")
+        self.assertGreater(引擎.统计.已解视频帧, 9,
+                           "网络源要能持续出帧｜日志：" + " / ".join(日志行[-6:]))
         self.assertIsNotNone(引擎.取最新帧())
 
     def test_HTTP10风格的服务器也能播(self):
@@ -210,7 +212,8 @@ class 网络播放测试(unittest.TestCase):
         线程.start()
         try:
             地址 = f"http://127.0.0.1:{端口}/样片.mp4"
-            引擎 = 播放引擎()
+            日志行: list[str] = []
+            引擎 = 播放引擎(日志回调=日志行.append)
             self.addCleanup(引擎.停止)
             引擎.打开(地址)          # 内部会先试完整选项，失败自动降级
             引擎.播放()
@@ -218,7 +221,8 @@ class 网络播放测试(unittest.TestCase):
             while time.time() < 截止 and 引擎.统计.已解视频帧 < 8:
                 time.sleep(0.05)
             self.assertGreater(引擎.统计.已解视频帧, 7,
-                               "HTTP/1.0 服务器上也要能出画面")
+                               "HTTP/1.0 服务器上也要能出画面｜日志："
+                               + " / ".join(日志行[-6:]))
         finally:
             服务器.shutdown()
             服务器.server_close()
@@ -291,7 +295,8 @@ class 网络播放测试(unittest.TestCase):
         self.记录["掐断"] = True
         self.记录["掐断次数"] = 0
         try:
-            引擎 = 播放引擎()
+            日志行: list[str] = []
+            引擎 = 播放引擎(日志回调=日志行.append)
             self.addCleanup(引擎.停止)
             引擎.打开(self.地址())
             引擎.播放()
@@ -299,7 +304,9 @@ class 网络播放测试(unittest.TestCase):
             while time.time() < 截止 and 引擎.统计.已解视频帧 < 20:
                 time.sleep(0.05)
             self.assertGreaterEqual(self.记录.get("掐断次数", 0), 1, "服务器应掐断过一次")
-            self.assertGreater(引擎.统计.已解视频帧, 19, "掐断后必须自己续上继续解帧")
+            self.assertGreater(引擎.统计.已解视频帧, 19,
+                           "掐断后必须自己续上继续解帧｜日志："
+                           + " / ".join(日志行[-6:]))
         finally:
             self.记录["掐断"] = False
 
