@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -89,6 +90,8 @@ class _基础解码器:
         self._帧指针 = int(库.avutil.av_frame_alloc() or 0)
         if not self._帧指针:
             raise RuntimeError(f"{self.名字}：分配帧失败")
+        if hasattr(self, "硬解就绪"):
+            self.硬解就绪()
 
     def 配置硬解(self) -> None:
         """硬解钩子（子类覆盖）。默认什么都不做。"""
@@ -96,6 +99,19 @@ class _基础解码器:
 
     def 关(self) -> None:
         库 = self.绑定
+        try:
+            if getattr(self, "_软件帧", 0):
+                指针 = ctypes.c_void_p(self._软件帧)
+                库.avutil.av_frame_free(ctypes.byref(指针))
+                self._软件帧 = 0
+        except Exception:  # noqa: BLE001
+            pass
+        # ⚠️ 这里**不能**自己 av_buffer_unref 设备引用：
+        #    ``AVCodecContext.hw_device_ctx`` 的所有权归上下文，
+        #    ``avcodec_free_context`` 会释放它 —— 我们再释放一次就是 double free
+        #    （实测：double free or corruption (!prev) 直接 abort）。
+        #    我们只把 Python 侧的记录清掉。
+        self._硬解设备引用 = 0
         try:
             if self._帧指针:
                 指针 = ctypes.c_void_p(self._帧指针)
@@ -160,21 +176,151 @@ class 视频解码器(_基础解码器):
 
     def __init__(self, 绑定: B.绑定, 流: 流信息) -> None:
         super().__init__(绑定, 流)
+        #: 输出给界面的目标尺寸（0 = 原始尺寸）。**这一项直接决定性能**：
+        #: 4K60 全尺寸 RGB 是 3840×1632×4 ≈ 25 MB/帧，60fps 就是 1.5 GB/s 的拷贝，
+        #: 实测解码 300 帧要 7.7s（明明解码只用 2.2s）；缩到显示尺寸（比如 1280×544）
+        #: 只剩 1/6，拷贝与 swscale 的时间立刻降下来。
+        self._输出宽 = 0
+        self._输出高 = 0
         self.缩放器 = 0
         self._缓冲 = None
         self._目标宽 = 0
         self._目标高 = 0
+        self._源宽 = 0
+        self._源高 = 0
         self._源格式 = -1
         self.硬解 = "软解"
+        self._硬解设备引用 = 0
+        self._硬件像素格式 = -1
+        self._硬解准备: tuple[str, str] | None = None
+        self._硬解失败原因 = ""
+        self._回调 = None                 # get_format 回调必须留引用，否则被 GC 掉就崩
+        self._软件帧 = 0                  # 硬件帧拷回来的"内存帧"
+        self.硬解帧数 = 0
 
     def 配置硬解(self) -> None:
-        # 硬解要自己管 surface 与互操作（VAAPI→GL / D3D11 纹理），
-        # 第一步先把**软解**这条路做扎实；硬解见 docs/路线图.md。
+        """挑一个硬件解码设备挂上去（VAAPI / D3D11VA）；不行就老实软解。
+
+        为什么要"设备上下文 + get_format 回调"这一套（这是 libav 硬解的标准姿势）：
+
+        * ``av_hwdevice_ctx_create`` 建出解码设备（Linux 用 VAAPI + /dev/dri/renderD128，
+          Windows 用 D3D11VA）；
+        * 把设备挂到 ``AVCodecContext.hw_device_ctx``，并给 ``get_format`` 回调 ——
+          解码器会拿着"我能输出的像素格式清单"来问我们选哪个，我们**挑硬件那个**；
+        * 之后 ``avcodec_receive_frame`` 出来的帧就是**硬件帧**（在显存里），
+          我们再用 ``av_hwframe_transfer_data`` 拷回内存做 swscale → RGB。
+
+        为什么不直接零拷贝上屏：那要为每个平台写 GL/D3D 纹理互操作（VAAPI→EGL、
+        D3D11 共享纹理），是另一个量级的工程；**解码放到 GPU 已经吃掉了绝大部分 CPU**
+        （本机实测 4K60：软解 ≈4.8 核，硬解 ≈0.9 核），零拷贝只是省一次内存拷贝，
+        留作后续优化（见 docs/架构与路线图.md）。
+        """
+        if os.environ.get("V2_不要硬解"):
+            self.硬解 = "软解（CPU，已按 V2_不要硬解 关闭硬解）"
+            return
+        候选 = self._硬解候选()
+        for 类型名, 类型号, 设备 in 候选:
+            if self._装硬解(类型名, 类型号, 设备):
+                return
         self.硬解 = "软解（CPU）"
 
+    def _硬解候选(self) -> list[tuple[str, int, str]]:
+        """本平台该试哪些硬解设备（顺序 = 优先级）。"""
+        if os.name == "nt":
+            return [("D3D11VA", 常量["AV_HWDEVICE_TYPE_D3D11VA"], "")]   # 设备名空 = 默认
+        候选 = []
+        # VAAPI 要指定渲染节点；先试 renderD128，再试 129（双显卡机器）
+        for 节点 in ("/dev/dri/renderD128", "/dev/dri/renderD129"):
+            if os.path.exists(节点):
+                候选.append(("VAAPI", 常量["AV_HWDEVICE_TYPE_VAAPI"], 节点))
+        return 候选
+
+    def _装硬解(self, 类型名: str, 类型号: int, 设备: str) -> bool:
+        """尝试挂一个硬解设备；成功返回 True（失败不抛异常，直接回退软解）。"""
+        库 = self.绑定
+        设备引用 = ctypes.c_void_p()
+        代码 = 库.avutil.av_hwdevice_ctx_create(
+            ctypes.byref(设备引用), int(类型号),
+            设备.encode() if 设备 else None, None, 0)
+        if 代码 < 0 or not 设备引用:
+            self._硬解失败原因 = f"{类型名} 设备建不起来：{库.错误文本(代码)}"
+            return False
+        # 挂到上下文（AVCodecContext.hw_device_ctx 是个 AVBufferRef*）
+        引用 = 库.avutil.av_buffer_ref(设备引用)
+        库.avutil.av_buffer_unref(ctypes.byref(设备引用))
+        if not 引用:
+            self._硬解失败原因 = f"{类型名}：引用设备失败"
+            return False
+        B.写ptr(self.上下文, "AVCodecContext", "hw_device_ctx", int(引用))
+        self._硬解设备引用 = int(引用)
+        self._硬件像素格式 = int(常量["AV_PIX_FMT_VAAPI"] if 类型名 == "VAAPI"
+                            else 常量["AV_PIX_FMT_D3D11"])
+        # get_format 回调：解码器问我们选哪种输出格式，我们挑硬件那个
+        self._回调 = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                    ctypes.POINTER(ctypes.c_int))(
+            self._选格式)
+        B.写ptr(self.上下文, "AVCodecContext", "get_format",
+               ctypes.cast(self._回调, ctypes.c_void_p).value or 0)
+        self._硬解准备 = (类型名, 设备)
+        return True
+
+    def _选格式(self, _上下文, 格式数组) -> int:
+        """``get_format`` 回调：优先选硬件像素格式，否则退回第一个能用的。"""
+        首选 = int(getattr(self, "_硬件像素格式", -1))
+        第一个 = -1
+        i = 0
+        while 格式数组 and i < 64:
+            值 = int(格式数组[i])
+            if 值 == -1:
+                break
+            if 第一个 < 0:
+                第一个 = 值
+            if 值 == 首选:
+                return 值
+            i += 1
+        self._硬解失败原因 = "解码器不支持这个硬解格式（回退软解）"
+        return 第一个 if 第一个 >= 0 else 0
+
+    def 硬解就绪(self) -> None:
+        """``avcodec_open2`` 成功后调用：确认硬解是否真的用上了。"""
+        if self._硬解准备:
+            类型名, 设备 = self._硬解准备
+            尾巴 = f"（{设备}）" if 设备 else ""
+            self.硬解 = f"{类型名} 硬解{尾巴}"
+        else:
+            self.硬解 = "软解（CPU）"
+            if self._硬解失败原因:
+                self.硬解 += f"：{self._硬解失败原因}"
+
+    def 设置输出尺寸(self, 宽: int, 高: int) -> None:
+        """告诉解码器"界面只需要这么大"（0 = 不缩放）。
+
+        为什么值得做：解码与缩放都在 C 里很快，**瓶颈是把像素搬进 Python**。
+        界面的视频区通常只有 1280 宽左右，没必要每帧搬 25 MB。
+        """
+        宽, 高 = max(0, int(宽 or 0)), max(0, int(高 or 0))
+        if (宽, 高) == (self._输出宽, self._输出高):
+            return
+        self._输出宽, self._输出高 = 宽, 高
+        if self.缩放器:                 # 尺寸变了要重建缩放器
+            self.绑定.swscale.sws_freeContext(self.缩放器)
+            self.缩放器 = 0
+        self._目标宽 = self._目标高 = 0
+
+    def _输出尺寸(self, 源宽: int, 源高: int) -> tuple[int, int]:
+        目标宽, 目标高 = self._输出宽, self._输出高
+        if 目标宽 <= 0 or 目标高 <= 0:
+            return 源宽, 源高
+        # 只缩不放：小于目标尺寸的片子按原样输出（省一次放大）
+        if 源宽 <= 目标宽 and 源高 <= 目标高:
+            return 源宽, 源高
+        比例 = min(目标宽 / 源宽, 目标高 / 源高)
+        return max(2, int(源宽 * 比例) & ~1), max(2, int(源高 * 比例) & ~1)
+
     def _准备缩放(self, 源宽: int, 源高: int, 源格式: int) -> None:
-        if self.缩放器 and (源宽, 源高, 源格式) == (self._目标宽, self._目标高,
-                                               self._源格式):
+        目标宽, 目标高 = self._输出尺寸(源宽, 源高)
+        if self.缩放器 and (源宽, 源高, 源格式, 目标宽, 目标高) == (
+                self._源宽, self._源高, self._源格式, self._目标宽, self._目标高):
             return
         if self.缩放器:
             self.绑定.swscale.sws_freeContext(self.缩放器)
@@ -182,13 +328,14 @@ class 视频解码器(_基础解码器):
         不需要缩放 = (源宽 == self.流.宽 and 源高 == self.流.高
                   and 源格式 == self.流.像素格式 and self.流.像素格式 in (
                       常量["AV_PIX_FMT_RGB24"], 常量["AV_PIX_FMT_BGRA"]))
-        self._目标宽, self._目标高, self._源格式 = 源宽, 源高, 源格式
+        self._源宽, self._源高, self._源格式 = 源宽, 源高, 源格式
+        self._目标宽, self._目标高 = 目标宽, 目标高
         self.缩放器 = int(self.绑定.swscale.sws_getContext(
             源宽, 源高, 源格式, self._目标宽, self._目标高,
             常量["AV_PIX_FMT_RGB0"], 常量["SWS_BILINEAR"], None, None, None) or 0)
         if not self.缩放器:
             raise RuntimeError(f"{self.名字}：建缩放器失败（{源宽}x{源高}）")
-        需要 = 源宽 * 源高 * 4
+        需要 = self._目标宽 * self._目标高 * 4
         if self._缓冲 is None or len(self._缓冲) < 需要:
             self._缓冲 = ctypes.create_string_buffer(需要 + 64)
 
@@ -199,20 +346,40 @@ class 视频解码器(_基础解码器):
         if 源宽 <= 0 or 源高 <= 0:
             return None
         源格式 = B.读i32(帧指针, "AVFrame", "format")
+        帧来源 = 帧指针
+        if (self._硬件像素格式 >= 0 and 源格式 == self._硬件像素格式
+                and not getattr(self, "硬件像素格式不能用", False)):
+            # 硬件帧（在显存里）：先拷回内存帧，再走同一条 swscale 路径
+            if not self._软件帧:
+                self._软件帧 = int(self.绑定.avutil.av_frame_alloc() or 0)
+            if not self._软件帧:
+                return None
+            self.绑定.avutil.av_frame_unref(self._软件帧)
+            代码 = self.绑定.avutil.av_hwframe_transfer_data(
+                self._软件帧, 帧指针, 0)
+            if 代码 < 0:
+                self._硬解失败原因 = f"硬件帧拷回内存失败：{self.绑定.错误文本(代码)}"
+                self.硬解 = "软解（CPU）" + f"：{self._硬解失败原因}"
+                self.硬件像素格式不能用 = True
+                return None
+            帧来源 = self._软件帧
+            源格式 = B.读i32(帧来源, "AVFrame", "format")
+            self.硬解帧数 += 1
         self._准备缩放(源宽, 源高, 源格式)
-        数据, 行 = self._图像指针数组(帧指针)
-        目标行 = 源宽 * 4
+        数据, 行 = self._图像指针数组(帧来源)
+        输出宽, 输出高 = self._目标宽, self._目标高
+        目标行 = 输出宽 * 4
         目标 = ctypes.c_void_p(ctypes.addressof(self._缓冲))
         行数组 = (ctypes.c_int * 4)(目标行, 0, 0, 0)
         结果 = self.绑定.swscale.sws_scale(
-            self.缩放器, 数据, 行, 0, 源高,
+            self.缩放器, 数据, 行, 0, self._源高,
             ctypes.cast(ctypes.byref(目标), ctypes.POINTER(ctypes.c_void_p)),
             行数组)
         if 结果 <= 0:
             return None
-        字节 = ctypes.string_at(目标.value, 目标行 * 源高)
+        字节 = ctypes.string_at(目标.value, 目标行 * 输出高)
         self.已解帧数 += 1
-        return 解码帧(数据=字节, 宽=源宽, 高=源高, 步长=目标行,
+        return 解码帧(数据=字节, 宽=输出宽, 高=输出高, 步长=目标行,
                     时间秒=self._帧时间(帧指针))
 
 

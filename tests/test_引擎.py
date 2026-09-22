@@ -81,6 +81,26 @@ class 引擎测试(unittest.TestCase):
         self.assertTrue(引擎.截图(str(目标)), "有画面时截图必须成功")
         self.assertGreater(目标.stat().st_size, 1000)
 
+    def test_没有音轨也能播(self):
+        """纯视频文件（没音轨）必须用系统时钟当主时钟 —— 否则画面一帧都不出。
+
+        实测踩到过：音频时钟只靠"写音频"推进，没音轨时它永远停在 0，
+        视频线程就一直等时钟 → 5 秒里只解出 2 帧。
+        """
+        from tests.公用 import 造素材
+        素材 = 造素材(self.临时.name, 秒=1.2, 带声音=False)
+        引擎 = 播放引擎()
+        self.addCleanup(引擎.停止)
+        引擎.打开(str(素材))
+        self.assertIsInstance(引擎.时钟, type(引擎.时钟))     # 有主时钟就行
+        引擎.播放()
+        截止 = time.time() + 5.0
+        while time.time() < 截止 and 引擎.统计.当前时间秒 < 0.8:
+            time.sleep(0.05)
+        self.assertGreater(引擎.统计.已解视频帧, 10,
+                           "没音轨时也要出画面（系统时钟）")
+        self.assertGreater(引擎.时钟.现在秒(), 0.5, "系统时钟要走起来")
+
     def test_音量缩放(self):
         引擎 = self._起播()
         原始 = b"\x00\x40" * 10          # 16384 的 S16 样本，10 个

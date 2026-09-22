@@ -71,11 +71,16 @@ class 引擎统计:
     音频设备: str = ""
     帧率: float = 0.0
     码率bps: float = 0.0
+    硬解帧: int = 0
+    输出尺寸: str = ""
 
     def 摘要(self) -> str:
         return (f"{self.状态}｜{self.当前时间秒:.1f}/{self.总时长秒:.1f}s"
                 f"｜{self.帧率:.0f}fps｜丢帧 {self.已丢视频帧}/{self.已解视频帧}"
-                f"｜{self.码率bps / 1e6:.1f}Mbps｜{self.硬解}｜{self.音频设备}")
+                f"｜{self.码率bps / 1e6:.1f}Mbps｜{self.硬解}"
+                f"（硬解帧 {self.硬解帧}）"
+                + (f"｜输出 {self.输出尺寸}" if self.输出尺寸 else "")
+                + f"｜{self.音频设备}")
 
 
 class 音频时钟:
@@ -101,6 +106,45 @@ class 音频时钟:
     def 现在秒(self, 设备延迟: float = 0.0) -> float:
         with self._锁:
             return self._基准秒 + self._样本 / self.采样率 - max(0.0, 设备延迟)
+
+
+class 系统时钟:
+    """没有音轨时用的主时钟：按系统单调时间走（暂停要靠调用方冻结）。
+
+    为什么必须有它（实测踩到）：纯视频文件（或音轨被禁用）里，音频线程根本不存在，
+    音频时钟永远停在 0 → 视频线程永远"等时钟" → **画面一帧都不出**。
+    所以"主时钟"要能在音频/系统之间切换，而不是写死成音频。
+    """
+
+    def __init__(self) -> None:
+        self._基准秒 = 0.0
+        self._起点时刻 = time.monotonic()
+        self._暂停累计 = 0.0
+        self._暂停开始 = 0.0
+        self._暂停中 = False
+
+    def 记写入(self, _样本数: int) -> None:      # 与音频时钟同接口
+        return
+
+    def 重置(self, 起点秒: float) -> None:
+        self._基准秒 = float(起点秒)
+        self._起点时刻 = time.monotonic()
+        self._暂停累计 = 0.0
+        self._暂停中 = False
+
+    def 暂停(self, 暂停: bool) -> None:
+        if 暂停 and not self._暂停中:
+            self._暂停中 = True
+            self._暂停开始 = time.monotonic()
+        elif not 暂停 and self._暂停中:
+            self._暂停中 = False
+            self._暂停累计 += time.monotonic() - self._暂停开始
+
+    def 现在秒(self, 设备延迟: float = 0.0) -> float:
+        跑到 = time.monotonic() - self._起点时刻 - self._暂停累计
+        if self._暂停中:
+            跑到 = self._暂停开始 - self._起点时刻 - self._暂停累计
+        return self._基准秒 + max(0.0, 跑到) - max(0.0, 设备延迟)
 
 
 class 播放引擎:
@@ -129,6 +173,7 @@ class 播放引擎:
         self._结束 = threading.Event()
         self._读入累计 = 0
         self._码率基点 = (0.0, 0)
+        self._输出尺寸 = (0, 0)
 
     # ---------------- 打开 / 收尾 ----------------
 
@@ -142,6 +187,8 @@ class 播放引擎:
         self.音频 = None
         if self.输入.视频流 is not None:
             self.视频 = 解码.视频解码器(self.输入.绑定, self.输入.视频流)
+            if self._输出尺寸 != (0, 0):
+                self.视频.设置输出尺寸(*self._输出尺寸)
             self.视频.打开()
             self.统计.硬解 = self.视频.硬解
             self.统计.帧率 = self.输入.视频流.帧率
@@ -153,8 +200,10 @@ class 播放引擎:
             self.时钟 = 音频时钟(解码.输出采样率)
             if getattr(self.输出, "失败原因", ""):
                 self._日志(f"[音频] {self.输出.失败原因}")
-        elif self.视频 is not None:
-            self.统计.音频设备 = "（这个文件没有音轨）"
+        else:
+            # 没有音轨 → 用系统时钟当主时钟（否则视频永远等不到时钟，画面不出）
+            self.时钟 = 系统时钟()
+            self.统计.音频设备 = "（这个文件没有音轨，用系统时钟）"
         self.状态 = 播放状态.暂停
 
     def 播放(self) -> None:
@@ -173,6 +222,8 @@ class 播放引擎:
                     线程.start()
                     self._线程们.append(线程)
             self._暂停.clear()
+            if isinstance(self.时钟, 系统时钟):
+                self.时钟.暂停(False)
             if self.输出 is not None:
                 try:
                     self.输出.恢复()          # PulseAudio 没有 pause，这里保留钩子
@@ -185,9 +236,13 @@ class 播放引擎:
         """返回是否处于暂停状态。"""
         if self.状态 == 播放状态.播放中:
             self._暂停.set()
+            if isinstance(self.时钟, 系统时钟):
+                self.时钟.暂停(True)
             self.状态 = 播放状态.暂停
         elif self.状态 == 播放状态.暂停:
             self._暂停.clear()
+            if isinstance(self.时钟, 系统时钟):
+                self.时钟.暂停(False)
             self.状态 = 播放状态.播放中
         self.统计.状态 = self.状态
         return self.状态 == 播放状态.暂停
@@ -204,6 +259,15 @@ class 播放引擎:
 
     def 设置音量(self, 音量: float) -> None:
         self.音量 = max(0.0, min(1.5, float(音量)))
+
+    def 设置输出尺寸(self, 宽: int, 高: int) -> None:
+        """告诉解码器界面需要多大（**性能关键**：4K 全尺寸每帧要搬 25 MB）。
+
+        界面在 resize 时调用；解码器只缩不放，且会缓存缩放器。
+        """
+        self._输出尺寸 = (max(0, int(宽 or 0)), max(0, int(高 or 0)))
+        if self.视频 is not None:
+            self.视频.设置输出尺寸(*self._输出尺寸)
 
     def 停止(self) -> None:
         self._停.set()
@@ -384,6 +448,9 @@ class 播放引擎:
             if 帧 is None:
                 continue
             self.统计.已解视频帧 += 1
+            self.统计.硬解帧 = int(getattr(self.视频, "硬解帧数", 0))
+            if 帧.宽 and not self.统计.输出尺寸:
+                self.统计.输出尺寸 = f"{帧.宽}x{帧.高}"
             if 帧.时间秒 < 0:
                 帧.时间秒 = self.统计.当前时间秒
             if not self._等到该显示(帧):

@@ -161,6 +161,13 @@ class 主窗口(QMainWindow):
         self._日志行.append(文本)
         del self._日志行[:-200]
 
+    def resizeEvent(self, 事件):  # noqa: N802 - Qt 命名
+        """窗口尺寸变了就告诉解码器（按显示尺寸缩放 = 省掉 4K 全尺寸拷贝）。"""
+        super().resizeEvent(事件)
+        区域 = self.视频.size()
+        if 区域.width() > 0 and 区域.height() > 0:
+            self.引擎.设置输出尺寸(区域.width(), 区域.height())
+
     def _刷新(self) -> None:
         self.引擎.统计.总时长秒 = self.引擎.统计.总时长秒 or 0.0
         序号 = self.引擎.取帧序号()

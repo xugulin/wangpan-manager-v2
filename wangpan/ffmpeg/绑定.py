@@ -51,6 +51,19 @@ __all__ = ["绑定", "取绑定", "读i32", "读i64", "读ptr", "读rat", "写i3
     "SWS_BILINEAR": 2,
     "SWS_FAST_BILINEAR": 1,
     "AV_PKT_FLAG_KEY": 1,
+    # ---- 硬件解码（M2）：同样是 C 探针打印出来的真实枚举值 ----
+    "AV_HWDEVICE_TYPE_NONE": 0,
+    "AV_HWDEVICE_TYPE_VDPAU": 1,
+    "AV_HWDEVICE_TYPE_CUDA": 2,
+    "AV_HWDEVICE_TYPE_VAAPI": 3,
+    "AV_HWDEVICE_TYPE_DXVA2": 4,
+    "AV_HWDEVICE_TYPE_QSV": 5,
+    "AV_HWDEVICE_TYPE_D3D11VA": 7,
+    "AV_PIX_FMT_VAAPI": 44,
+    "AV_PIX_FMT_D3D11": 171,
+    "AV_PIX_FMT_D3D11VA_VLD": 116,
+    "AV_PIX_FMT_DXVA2_VLD": 51,
+    "AV_PIX_FMT_P010": 158,
 }
 
 _绑定: Optional["绑定"] = None
@@ -139,6 +152,24 @@ class 绑定:
         self.avutil.av_malloc.restype = 空
         self.avutil.av_free.argtypes = [空]
         self.avutil.av_free.restype = None
+
+        # ---- avutil：硬件解码（M2） ----
+        self.avutil.av_hwdevice_ctx_create.argtypes = [
+            ctypes.POINTER(空), 整, 串, ctypes.POINTER(空), 整]
+        self.avutil.av_hwdevice_ctx_create.restype = 整
+        self.avutil.av_hwframe_transfer_data.argtypes = [空, 空, 整]
+        self.avutil.av_hwframe_transfer_data.restype = 整
+        self.avutil.av_hwframe_transfer_get_formats.argtypes = [
+            空, 整, ctypes.POINTER(ctypes.POINTER(整)), 整]
+        self.avutil.av_hwframe_transfer_get_formats.restype = 整
+        self.avutil.av_buffer_ref.argtypes = [空]
+        self.avutil.av_buffer_ref.restype = 空
+        self.avutil.av_buffer_unref.argtypes = [ctypes.POINTER(空)]
+        self.avutil.av_buffer_unref.restype = None
+        self.avutil.av_hwdevice_get_type_name.argtypes = [整]
+        self.avutil.av_hwdevice_get_type_name.restype = 串
+        self.avutil.av_pix_fmt_desc_get.argtypes = [整]
+        self.avutil.av_pix_fmt_desc_get.restype = 空
 
         # ---- avformat ----
         self.avformat.avformat_open_input.argtypes = [
