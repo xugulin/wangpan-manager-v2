@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,24 @@ if os.name != "nt":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from wangpan.player.引擎 import 播放引擎     # noqa: E402
+
+
+def 打线程栈(记) -> None:
+    """把每个线程**卡在哪一行**打出来（只靠计数猜不出来时，这是最快的证据）。
+
+    为什么需要：Windows CI 上出现过"解封装已退出、视频线程存活、却只解出 1 帧"，
+    光看计数完全不知道卡在哪 —— 栈一打就清楚了。
+    """
+    import sys as _sys
+    import traceback
+    帧们 = _sys._current_frames()
+    for 线程 in threading.enumerate():
+        帧 = 帧们.get(线程.ident)
+        if 帧 is None:
+            continue
+        记(f"  线程 {线程.name}：")
+        for 行 in traceback.format_stack(帧)[-4:]:
+            记("    " + 行.strip().replace("\n", " "))
 
 素材 = 项目根 / "工具" / "测试素材" / "样片.mp4"
 行: list[str] = []
@@ -57,6 +76,9 @@ def main() -> int:
           f"｜队列 视频{视频队列}/音频{音频队列}｜{线程们}")
         if 引擎.统计.已解视频帧 >= 30:
             break
+        if 轮 == 2:
+            记("（到第 3 轮还没出够帧，打一次线程栈）")
+            打线程栈(记)
     记(f"最终：{引擎.统计.摘要()}")
     引擎.停止()
     报告 = 项目根 / "数据" / "诊断播放.txt"
