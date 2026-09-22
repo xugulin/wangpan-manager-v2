@@ -98,14 +98,20 @@ class 音频时钟:
         with self._锁:
             self._样本 += int(样本数)
 
-    def 重置(self, 起点秒: float) -> None:
+    def 重置(self, 起点秒: float, 倍速: float = 1.0) -> None:
         with self._锁:
             self._基准秒 = float(起点秒)
+            self.倍速 = max(0.1, min(8.0, float(倍速 or 1.0)))
             self._样本 = 0
+
+    #: 倍速（>1 快放）。音频是"按原速重采样后以倍速写出去"，
+    #: 所以时钟要用同一个倍速折算 —— 否则画面会比声音慢/快（实测过）。
+    倍速 = 1.0
 
     def 现在秒(self, 设备延迟: float = 0.0) -> float:
         with self._锁:
-            return self._基准秒 + self._样本 / self.采样率 - max(0.0, 设备延迟)
+            return (self._基准秒 + self._样本 / self.采样率 * self.倍速
+                    - max(0.0, 设备延迟) * self.倍速)
 
 
 class 系统时钟:
@@ -126,8 +132,9 @@ class 系统时钟:
     def 记写入(self, _样本数: int) -> None:      # 与音频时钟同接口
         return
 
-    def 重置(self, 起点秒: float) -> None:
+    def 重置(self, 起点秒: float, 倍速: float = 1.0) -> None:
         self._基准秒 = float(起点秒)
+        self.倍速 = max(0.1, min(8.0, float(倍速 or 1.0)))
         self._起点时刻 = time.monotonic()
         self._暂停累计 = 0.0
         self._暂停中 = False
@@ -140,11 +147,14 @@ class 系统时钟:
             self._暂停中 = False
             self._暂停累计 += time.monotonic() - self._暂停开始
 
+    倍速 = 1.0
+
     def 现在秒(self, 设备延迟: float = 0.0) -> float:
         跑到 = time.monotonic() - self._起点时刻 - self._暂停累计
         if self._暂停中:
             跑到 = self._暂停开始 - self._起点时刻 - self._暂停累计
-        return self._基准秒 + max(0.0, 跑到) - max(0.0, 设备延迟)
+        return (self._基准秒 + max(0.0, 跑到) * self.倍速
+                - max(0.0, 设备延迟) * self.倍速)
 
 
 class 播放引擎:
@@ -160,6 +170,8 @@ class 播放引擎:
         self.统计 = 引擎统计()
         self.状态 = 播放状态.空闲
         self.音量 = 1.0
+        self.倍速 = 1.0
+        self._单帧模式 = False
         self._锁 = threading.RLock()
         self._最新帧: Optional[解码.解码帧] = None
         self._帧序号 = 0
@@ -310,6 +322,60 @@ class 播放引擎:
 
     def 设置音量(self, 音量: float) -> None:
         self.音量 = max(0.0, min(1.5, float(音量)))
+
+    def 设置倍速(self, 倍速: float) -> float:
+        """设置播放倍速（0.25~4.0），返回真正生效的值。
+
+        实现方式：**音频按"倍速 × 采样率"重采样**（等于把音频变短），视频时钟也按
+        同一个倍速折算 —— 两边用同一个系数，音画就不会散。
+        注意：这会改变音调（和 libvlc/VLC 的倍速行为一致）而不是保持音调。
+        """
+        倍速 = max(0.25, min(4.0, float(倍速 or 1.0)))
+        self.倍速 = 倍速
+        if isinstance(self.时钟, (音频时钟, 系统时钟)):
+            self.时钟.倍速 = 倍速
+        if self.音频 is not None:
+            try:
+                self.音频.设置倍速(倍速)
+            except Exception:  # noqa: BLE001
+                pass
+        self._日志(f"[播放] 倍速 {倍速:.2f}×")
+        return 倍速
+
+    def 逐帧(self) -> bool:
+        """暂停 + 前进一帧（"逐帧看"）。返回是否真的前进了一帧。
+
+        注意：**光"收帧"不够** —— 解码是"喂包才有帧"，暂停时队列里可能已经空了，
+        所以要"没帧就喂一个包"，最多试几十次（B 帧重排时前面几个包本来就不出帧）。
+        """
+        if self.输入 is None or self.视频 is None:
+            return False
+        if self.状态 == 播放状态.播放中:
+            self.设置暂停(True)
+        for _尝试 in range(40):
+            帧 = self.视频.解码一帧()
+            if 帧 is not None:
+                if 帧.时间秒 >= 0:
+                    self.统计.当前时间秒 = 帧.时间秒
+                self.统计.已解视频帧 += 1
+                self.统计.硬解帧 = int(getattr(self.视频, "硬解帧数", 0))
+                with self._锁:
+                    self._最新帧 = 帧
+                    self._帧序号 += 1
+                return True
+            try:
+                条目 = self._视频队列.get_nowait()
+            except queue.Empty:
+                return False
+            if 条目 == "冲刷":
+                self.视频.送空包()
+                continue
+            _包, 新包 = 条目
+            try:
+                self.视频.送包(新包)
+            finally:
+                self.输入.释放新包(新包)
+        return False
 
     def 设置输出尺寸(self, 宽: int, 高: int) -> None:
         """告诉解码器界面需要多大（**性能关键**：4K 全尺寸每帧要搬 25 MB）。

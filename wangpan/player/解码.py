@@ -97,6 +97,15 @@ class _基础解码器:
         """硬解钩子（子类覆盖）。默认什么都不做。"""
         return
 
+    def 解码一帧(self) -> Optional[解码帧]:
+        """收一帧并转换（逐帧步进用）；没有可收的帧时返回 None。
+
+        注意：解码是异步的（要喂包才有帧），所以这里"收一次"；调用方负责喂包。
+        """
+        if self.收帧() < 0:
+            return None
+        return self.取帧()
+
     def 关(self) -> None:
         库 = self.绑定
         try:
@@ -395,6 +404,7 @@ class 音频解码器(_基础解码器):
         self._输出布局 = None
         self._输入布局 = None
         self._缓冲 = None
+        self._倍速 = 1.0
 
     def 打开(self) -> None:
         super().打开()
@@ -405,6 +415,17 @@ class 音频解码器(_基础解码器):
         布局 = (ctypes.c_byte * 24)()          # AVChannelLayout 是 24 字节（64 位）
         self.绑定.avutil.av_channel_layout_default(ctypes.byref(布局), int(声道数))
         return 布局
+
+    def 设置倍速(self, 倍速: float) -> None:
+        """倍速：把"输出采样率"乘上倍速（等价于把音频缩短），需要重建重采样器。"""
+        倍速 = max(0.25, min(4.0, float(倍速 or 1.0)))
+        if abs(倍速 - self._倍速) < 0.001:
+            return
+        self._倍速 = 倍速
+        if self.重采样器:
+            self.绑定.swresample.swr_free(__import__("ctypes").byref(
+                __import__("ctypes").c_void_p(self.重采样器)))
+            self.重采样器 = 0
 
     def _准备重采样(self, 采样率: int, 声道数: int, 格式: int) -> None:
         if self.重采样器 and (采样率, 声道数, 格式) == (self.源采样率, self.源声道,
@@ -419,7 +440,8 @@ class 音频解码器(_基础解码器):
         输出 = ctypes.c_void_p()
         代码 = self.绑定.swresample.swr_alloc_set_opts2(
             ctypes.byref(输出),
-            ctypes.byref(self._输出布局), 输出样本格式, 输出采样率,
+            ctypes.byref(self._输出布局), 输出样本格式,
+            int(输出采样率 * self._倍速),
             ctypes.byref(self._输入布局), 格式, 采样率,
             0, None)
         if 代码 < 0 or not 输出:

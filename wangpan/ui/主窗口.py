@@ -15,10 +15,12 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-                             QPushButton, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
+                             QMainWindow, QPushButton, QSlider, QVBoxLayout,
+                             QWidget)
 
 from ..player.引擎 import 播放引擎, 播放状态
+from ..player.记录 import 记录本
 from ..subtitle import (画字幕, 字幕轨道, 找同名字幕, 读字幕文件,
                       位置底部, 位置顶部)          # noqa: F401 - 字幕（M4）
 from .视频控件 import 视频控件
@@ -39,6 +41,9 @@ class 主窗口(QMainWindow):
         self.setWindowTitle("网盘管理 V2 · 自研播放内核")
         self.resize(1100, 680)
         self.引擎 = 播放引擎(日志回调=self._写日志)
+        self.记录本 = 记录本()
+        self.列表: list[str] = []          # 播放列表（本地文件或直链）
+        self.列表序号 = -1
         self._帧序号 = -1
         self._拖动中 = False
         self._日志行: list[str] = []
@@ -85,6 +90,24 @@ class 主窗口(QMainWindow):
         self.音量.valueChanged.connect(lambda v: self.引擎.设置音量(v / 100))
         行.addWidget(self.音量)
         self.字幕按钮2 = None
+        self.上一集 = QPushButton("⏮ 上一集")
+        self.上一集.clicked.connect(lambda: self._切列表(-1))
+        self.下一集 = QPushButton("⏭ 下一集")
+        self.下一集.clicked.connect(lambda: self._切列表(1))
+        行.addWidget(self.上一集)
+        行.addWidget(self.下一集)
+        行.addWidget(QLabel("倍速"))
+        self.倍速框 = QComboBox()
+        for 值 in ("0.5", "0.75", "1", "1.25", "1.5", "2", "3"):
+            self.倍速框.addItem(f"{值}×", float(值))
+        self.倍速框.setCurrentIndex(2)
+        self.倍速框.currentIndexChanged.connect(
+            lambda _i: self.引擎.设置倍速(self.倍速框.currentData()))
+        行.addWidget(self.倍速框)
+        self.逐帧按钮 = QPushButton("⏯ 逐帧")
+        self.逐帧按钮.setToolTip("暂停后每点一次前进一帧")
+        self.逐帧按钮.clicked.connect(self._逐帧)
+        行.addWidget(self.逐帧按钮)
         self.截图按钮 = QPushButton("📷 截图")
         self.截图按钮.clicked.connect(self._截图)
         行.addWidget(self.截图按钮)
@@ -101,10 +124,14 @@ class 主窗口(QMainWindow):
         self._定时器.setInterval(16)
         self._定时器.timeout.connect(self._刷新)
         self._定时器.start()
+        self._存档定时器 = QTimer(self)          # 每 5 秒把播放位置落盘
+        self._存档定时器.setInterval(5000)
+        self._存档定时器.timeout.connect(self._存档位置)
+        self._存档定时器.start()
 
     # ---------------- 对外 ----------------
 
-    def 打开(self, 路径: str) -> bool:
+    def 打开(self, 路径: str, 续播: bool = True) -> bool:
         try:
             self.引擎.打开(str(路径))
         except Exception as 错:  # noqa: BLE001
@@ -126,7 +153,18 @@ class 主窗口(QMainWindow):
             self.视频.设置字幕(None, False)
         self.引擎.播放()
         self.播放按钮.setText("⏸ 暂停")
+        # M5：记住"看过哪儿"，下次接着播
+        try:
+            时长 = self.引擎.统计.总时长秒
+            self.记录本.记开始(str(路径), 时长, Path(路径).name)
+            位置 = self.记录本.续播位置(str(路径)) if 续播 else 0.0
+            if 位置 > 1.0:
+                self.引擎.跳转(位置)
+                self.状态.showMessage(f"⏩ 从上次看到的位置继续：{时间文本(位置)}")
+        except Exception:  # noqa: BLE001
+            pass
         self.setWindowTitle(f"网盘管理 V2 · {Path(路径).name}")
+        self._建列表(str(路径))
         self.状态.showMessage(f"▶ {self.引擎.统计.音视频}｜时长 "
                           f"{时间文本(self.引擎.统计.总时长秒)}")
         return True
@@ -168,6 +206,31 @@ class 主窗口(QMainWindow):
         if 总 > 0:
             self.引擎.跳转(总 * self.进度.value() / 1000.0)
 
+    def _建列表(self, 路径: str) -> None:
+        """本地文件：把同目录的视频排成播放列表（按文件名排序）。"""
+        目标 = Path(路径)
+        if not 目标.is_file():
+            self.列表, self.列表序号 = [路径], 0
+            return
+        后缀 = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".ts", ".flv", ".m4v", ".wmv"}
+        兄弟们 = sorted(p for p in 目标.parent.iterdir()
+                     if p.is_file() and p.suffix.lower() in 后缀)
+        自己 = [p for p in 兄弟们 if p.resolve() == 目标.resolve()]
+        self.列表 = [str(p) for p in (兄弟们 or 自己 or [目标])]
+        self.列表序号 = self.列表.index(str(目标)) if str(目标) in self.列表 else 0
+
+    def _切列表(self, 步: int) -> None:
+        if not self.列表:
+            return
+        self.列表序号 = max(0, min(len(self.列表) - 1, self.列表序号 + 步))
+        self.打开(self.列表[self.列表序号])
+
+    def _逐帧(self) -> None:
+        if self.引擎.逐帧():
+            self.状态.showMessage(f"⏯ 逐帧：{self.引擎.统计.当前时间秒:.3f}s")
+        else:
+            self.状态.showMessage("⏯ 逐帧：没有可前进的帧（先暂停或先播放一下）")
+
     def _切字幕(self) -> None:
         """有多个同名字幕就轮换；一个都没有就手动选一个；都没有就提示。"""
         轨道们 = getattr(self, "_字幕们", []) or []
@@ -203,6 +266,19 @@ class 主窗口(QMainWindow):
             self.状态.showMessage(f"📷 已保存 {目标}")
         else:
             self.状态.showMessage("📷 截图失败：还没有画面")
+
+    def _存档位置(self) -> None:
+        try:
+            统计 = self.引擎.统计
+            if self.引擎.输入 is not None and 统计.当前时间秒 > 1.0:
+                self.记录本.记位置(str(self.引擎.输入.地址), 统计.当前时间秒,
+                               统计.总时长秒, Path(self.引擎.输入.地址).name)
+                self.记录本.存()
+                if 统计.总时长秒 > 0 and 统计.当前时间秒 >= 统计.总时长秒 - 2:
+                    self.记录本.记看完(str(self.引擎.输入.地址))
+                    self.记录本.存()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _写日志(self, 文本: str) -> None:
         self._日志行.append(文本)
@@ -248,6 +324,22 @@ class 主窗口(QMainWindow):
         if 事件.key() == Qt.Key.Key_Escape and self.isFullScreen():
             self._切全屏()
             return
+        if 事件.key() == Qt.Key.Key_Period:          # . 逐帧
+            self._逐帧()
+            return
+        if 事件.key() == Qt.Key.Key_BracketRight:    # ] 加速
+            self.倍速框.setCurrentIndex(min(self.倍速框.count() - 1,
+                                        self.倍速框.currentIndex() + 1))
+            return
+        if 事件.key() == Qt.Key.Key_BracketLeft:     # [ 减速
+            self.倍速框.setCurrentIndex(max(0, self.倍速框.currentIndex() - 1))
+            return
+        if 事件.key() == Qt.Key.Key_PageDown:
+            self._切列表(1)
+            return
+        if 事件.key() == Qt.Key.Key_PageUp:
+            self._切列表(-1)
+            return
         if 事件.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             步 = -5.0 if 事件.key() == Qt.Key.Key_Left else 5.0
             self.引擎.跳转(max(0.0, self.引擎.统计.当前时间秒 + 步))
@@ -255,6 +347,7 @@ class 主窗口(QMainWindow):
         super().keyPressEvent(事件)
 
     def closeEvent(self, 事件):  # noqa: N802 - Qt 命名
+        self._存档位置()                     # 关窗再存一次（别丢最后几秒）
         try:
             self.引擎.停止()
         except Exception:  # noqa: BLE001
