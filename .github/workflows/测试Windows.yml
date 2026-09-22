@@ -44,13 +44,19 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
-          运行环境\venv\Scripts\python.exe -c "import sys; sys.path.insert(0,'.'); from wangpan.ffmpeg import 加载, 绑定; print('可用:', 加载.可用(), 加载.不可用原因()); print({k: 加载.版本文本(v) for k,v in 加载.库版本().items()}); print('路径:', {k: 加载.路径(k) for k in ('avformat','avcodec','avutil','swscale','swresample')}); 绑定.取绑定().检查ABI(); print('ABI 自检通过')"
+          # ⚠️ 不要用 python -c "…中文…"：Windows 控制台是 cp936，
+          #    命令行里带中文会直接 UnicodeEncodeError（真机 CI 踩过）。跑 UTF-8 文件。
+          运行环境\venv\Scripts\python.exe 工具\自检.py
 
       - name: 单元测试（离屏 Qt）
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
           运行环境\venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 
@@ -58,6 +64,8 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
           # 这段是"用户视角"的验收：真解码、真出帧、真存图、真走一遍 HTTP。
           运行环境\venv\Scripts\python.exe 工具\windows真机验收.py

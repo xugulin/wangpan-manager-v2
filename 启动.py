@@ -40,6 +40,8 @@ def _自举() -> None:
 def main() -> int:
     _自举()
     sys.path.insert(0, str(项目根))
+    from wangpan.控制台 import 修控制台
+    修控制台()          # Windows 控制台是 cp936，不修的话第一句中文日志就抛异常
     if not os.environ.get("DISPLAY") and os.name != "nt":
         # 没有显示环境时给个明确说法（比 Qt 自己 abort 友好）
         print("没有 DISPLAY：V2 是桌面程序，请在图形会话里运行", file=sys.stderr)

@@ -28,6 +28,9 @@ from pathlib import Path
 
 项目根 = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(项目根))
+from wangpan.控制台 import 修控制台          # noqa: E402 - 必须在打印中文之前
+
+修控制台()
 if os.name != "nt":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
