@@ -1,0 +1,9 @@
+[project]
+name = "wangpan-v2"
+version = "2.0.0"
+description = "网盘管理 V2：自研播放内核（libav* + Qt），与 V1 完全独立"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.6"]      # libav* 走 ctypes 直连，不是 Python 包依赖
+
+[tool.setuptools]
+packages = ["wangpan", "wangpan.ffmpeg", "wangpan.player", "wangpan.ui"]

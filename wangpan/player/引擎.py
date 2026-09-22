@@ -1,0 +1,500 @@
+"""播放引擎：**我们自己的播放器循环**（解封装 → 解码 → 音频主时钟 → 视频按时呈现）。
+
+线程模型（三个线程 + 两个有界队列，背压天然存在，不会把内存吃光）
+================================================================
+::
+
+    解封装线程 ──[视频包队列]──> 视频线程 ──> 最新帧（只保留最新一张，供界面取）
+              └─[音频包队列]──> 音频线程 ──> 音频设备（PulseAudio）──> 音频主时钟
+
+* **音频是主时钟**：音频线程每写出去一块，就把"已播到哪儿"记进 :class:`音频时钟`
+  （再减去设备延迟）；
+* **视频跟着时钟走**：早到的帧等一等，晚到超过 ``丢帧阈值`` 的帧直接丢（并计数）；
+* 暂停 = 三个线程都停在同一处（音频不写、视频不呈现、解封装不读），**不是**忙等；
+* 跳转 = 停一下 → 冲刷队列与解码器 → ``avformat_seek_file`` → 复位时钟 → 继续。
+
+为什么要自己写（而不是用现成播放器）
+====================================
+这一步之后，"画面在哪个窗口、由谁画、什么时候画"**完全由我们决定**：
+界面只是从 :meth:`播放引擎.取最新帧` 拿一张图自己画 —— 不存在"第三方播放器自己开窗口"
+这一类问题。硬解、字幕、直链这些都在这个骨架上加，不再受别人的平台规则牵制。
+"""
+
+from __future__ import annotations
+
+import ctypes
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from ..ffmpeg import 绑定 as B
+from ..ffmpeg.绑定 import 常量
+from . import 解码
+from .音频输出 import 音频输出设备, 打开输出
+from .解封装 import 输入
+
+__all__ = ["播放引擎", "播放状态", "引擎统计"]
+
+#: 队列深度（包数）。128 个包 ≈ 一两秒，够抗抖动、又不至于堆内存
+视频队列深度 = 96
+音频队列深度 = 192
+#: 视频比音频早到多少算"该等"（秒）—— 提前量，避免刚好卡在边界上抖
+视频提前量 = 0.004
+#: 帧比时钟晚多少就直接丢（秒）
+丢帧阈值 = 0.080
+#: 解码线程等不到数据时的轮询间隔（秒）
+轮询间隔 = 0.004
+
+
+class 播放状态:
+    空闲 = "空闲"
+    播放中 = "播放中"
+    暂停 = "暂停"
+    结束 = "结束"
+    出错 = "出错"
+
+
+@dataclass
+class 引擎统计:
+    已解视频帧: int = 0
+    已丢视频帧: int = 0
+    已解音频块: int = 0
+    已播音频秒: float = 0.0
+    读入字节: int = 0
+    当前时间秒: float = 0.0
+    总时长秒: float = 0.0
+    状态: str = 播放状态.空闲
+    音视频: str = ""
+    硬解: str = ""
+    音频设备: str = ""
+    帧率: float = 0.0
+    码率bps: float = 0.0
+
+    def 摘要(self) -> str:
+        return (f"{self.状态}｜{self.当前时间秒:.1f}/{self.总时长秒:.1f}s"
+                f"｜{self.帧率:.0f}fps｜丢帧 {self.已丢视频帧}/{self.已解视频帧}"
+                f"｜{self.码率bps / 1e6:.1f}Mbps｜{self.硬解}｜{self.音频设备}")
+
+
+class 音频时钟:
+    """音频主时钟：已写样本数 − 设备延迟 = "现在听到的是第几秒"。"""
+
+    def __init__(self, 采样率: int = 解码.输出采样率) -> None:
+        self.采样率 = 采样率
+        self._基准秒 = 0.0          # 这一段的起点（跳转会重置）
+        self._样本 = 0
+        self._锁 = threading.Lock()
+        self.暂停中 = False
+        self._暂停时刻 = 0.0
+
+    def 记写入(self, 样本数: int) -> None:
+        with self._锁:
+            self._样本 += int(样本数)
+
+    def 重置(self, 起点秒: float) -> None:
+        with self._锁:
+            self._基准秒 = float(起点秒)
+            self._样本 = 0
+
+    def 现在秒(self, 设备延迟: float = 0.0) -> float:
+        with self._锁:
+            return self._基准秒 + self._样本 / self.采样率 - max(0.0, 设备延迟)
+
+
+class 播放引擎:
+    """一个文件的播放：打开 → 起播 → （暂停/跳转/音量）→ 停止。"""
+
+    def __init__(self, 日志回调: Optional[Callable[[str], None]] = None) -> None:
+        self._日志 = 日志回调 or (lambda _t: None)
+        self.输入: Optional[输入] = None
+        self.视频: Optional[解码.视频解码器] = None
+        self.音频: Optional[解码.音频解码器] = None
+        self.输出: Optional[音频输出设备] = None
+        self.时钟 = 音频时钟()
+        self.统计 = 引擎统计()
+        self.状态 = 播放状态.空闲
+        self.音量 = 1.0
+        self._锁 = threading.RLock()
+        self._最新帧: Optional[解码.解码帧] = None
+        self._帧序号 = 0
+        self._线程们: list[threading.Thread] = []
+        self._视频队列: queue.Queue = queue.Queue(maxsize=视频队列深度)
+        self._音频队列: queue.Queue = queue.Queue(maxsize=音频队列深度)
+        self._停 = threading.Event()          # 停止（收尾）
+        self._暂停 = threading.Event()        # 暂停
+        self._跳转请求: Optional[float] = None
+        self._跳转锁 = threading.Lock()
+        self._结束 = threading.Event()
+        self._读入累计 = 0
+        self._码率基点 = (0.0, 0)
+
+    # ---------------- 打开 / 收尾 ----------------
+
+    def 打开(self, 地址: str, 选项: Optional[dict] = None) -> None:
+        self.停止()
+        self.输入 = 输入.打开(地址, 选项)
+        self.统计.总时长秒 = self.输入.时长秒
+        self.统计.音视频 = "、".join(流.一句话() for 流 in self.输入.流们)
+        self._日志(f"[播放] 已打开：{self.统计.音视频}｜时长 {self.输入.时长秒:.1f}s")
+        self.视频 = None
+        self.音频 = None
+        if self.输入.视频流 is not None:
+            self.视频 = 解码.视频解码器(self.输入.绑定, self.输入.视频流)
+            self.视频.打开()
+            self.统计.硬解 = self.视频.硬解
+            self.统计.帧率 = self.输入.视频流.帧率
+        if self.输入.音频流 is not None:
+            self.音频 = 解码.音频解码器(self.输入.绑定, self.输入.音频流)
+            self.音频.打开()
+            self.输出 = 打开输出(解码.输出采样率, 解码.输出声道数)
+            self.统计.音频设备 = self.输出.名字
+            self.时钟 = 音频时钟(解码.输出采样率)
+            if getattr(self.输出, "失败原因", ""):
+                self._日志(f"[音频] {self.输出.失败原因}")
+        elif self.视频 is not None:
+            self.统计.音频设备 = "（这个文件没有音轨）"
+        self.状态 = 播放状态.暂停
+
+    def 播放(self) -> None:
+        """起播（或从暂停继续）。第一次调用会拉起三个线程。"""
+        if self.输入 is None:
+            raise RuntimeError("还没打开文件（先 打开()）")
+        with self._锁:
+            if not self._线程们:
+                self._停.clear()
+                self._结束.clear()
+                造 = [("解封装", self._解封装循环), ("视频", self._视频循环)]
+                if self.音频 is not None and self.输出 is not None:
+                    造.append(("音频", self._音频循环))
+                for 名, 函数 in 造:
+                    线程 = threading.Thread(target=函数, name=f"V2-{名}", daemon=True)
+                    线程.start()
+                    self._线程们.append(线程)
+            self._暂停.clear()
+            if self.输出 is not None:
+                try:
+                    self.输出.恢复()          # PulseAudio 没有 pause，这里保留钩子
+                except Exception:  # noqa: BLE001
+                    pass
+            self.状态 = 播放状态.播放中
+            self.统计.状态 = self.状态
+
+    def 暂停切换(self) -> bool:
+        """返回是否处于暂停状态。"""
+        if self.状态 == 播放状态.播放中:
+            self._暂停.set()
+            self.状态 = 播放状态.暂停
+        elif self.状态 == 播放状态.暂停:
+            self._暂停.clear()
+            self.状态 = 播放状态.播放中
+        self.统计.状态 = self.状态
+        return self.状态 == 播放状态.暂停
+
+    def 设置暂停(self, 暂停: bool) -> None:
+        if 暂停 and self.状态 == 播放状态.播放中:
+            self.暂停切换()
+        elif not 暂停 and self.状态 == 播放状态.暂停:
+            self.播放()
+
+    def 跳转(self, 秒: float) -> None:
+        with self._跳转锁:
+            self._跳转请求 = max(0.0, float(秒))
+
+    def 设置音量(self, 音量: float) -> None:
+        self.音量 = max(0.0, min(1.5, float(音量)))
+
+    def 停止(self) -> None:
+        self._停.set()
+        self._暂停.clear()
+        for 线程 in list(self._线程们):
+            线程.join(timeout=1.5)
+        self._线程们.clear()
+        self._排空队列()
+        try:
+            if self.输出 is not None:
+                self.输出.关()
+        except Exception:  # noqa: BLE001
+            pass
+        self.输出 = None
+        for 部件 in (self.视频, self.音频):
+            try:
+                if 部件 is not None:
+                    部件.关()
+            except Exception:  # noqa: BLE001
+                pass
+        self.视频 = self.音频 = None
+        try:
+            if self.输入 is not None:
+                self.输入.关闭()
+        except Exception:  # noqa: BLE001
+            pass
+        self.输入 = None
+        if self.状态 != 播放状态.结束:
+            self.状态 = 播放状态.空闲
+        self.统计.状态 = self.状态
+
+    # ---------------- 界面取帧 ----------------
+
+    def 取最新帧(self) -> Optional[解码.解码帧]:
+        with self._锁:
+            return self._最新帧
+
+    def 取帧序号(self) -> int:
+        with self._锁:
+            return self._帧序号
+
+    # ---------------- 三个循环 ----------------
+
+    def _排空队列(self) -> None:
+        """丢掉队列里还没解码的包 —— **必须释放**（它们是我们复制出来的引用）。"""
+        for 队列 in (self._视频队列, self._音频队列):
+            while True:
+                try:
+                    条目 = 队列.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(条目, tuple) and len(条目) == 2 and self.输入 is not None:
+                    try:
+                        self.输入.释放新包(条目[1])
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def _该停(self) -> bool:
+        return self._停.is_set()
+
+    def _等一等(self) -> bool:
+        """暂停时在这里睡；返回 False 表示该退出（停止）。"""
+        次数 = 0
+        while self._暂停.is_set() and not self._该停():
+            time.sleep(0.01)
+            次数 += 1
+            if 次数 == 1:
+                self._日志("[播放] 已暂停")
+        return not self._该停()
+
+    def _解封装循环(self) -> None:
+        try:
+            while not self._该停():
+                if not self._等一等():
+                    return
+                跳转 = self._取跳转请求()
+                包 = self.输入.读包()
+                if 跳转 is not None:
+                    # 跳转：先丢弃当前这一包，做完整冲刷，再继续读
+                    if 包 is not None:
+                        self.输入.释放包()
+                    self._执行跳转(跳转)
+                    continue
+                if 包 is None:
+                    # EOF：给两个解码器送空包，把 B 帧等缓存吐干净
+                    if self.视频 is not None:
+                        self._视频队列.put("冲刷")
+                    if self.音频 is not None:
+                        self._音频队列.put("冲刷")
+                    self._结束.set()
+                    return
+                大小 = int(包["大小"])
+                self._读入累计 += 大小
+                self.统计.读入字节 += 大小
+                if self.视频 is not None and 包["流序号"] == self.输入.视频流.序号:
+                    新包 = self.输入.复制包()
+                    self.输入.释放包()
+                    self._放队列(self._视频队列, (包, 新包))
+                elif (self.音频 is not None
+                      and 包["流序号"] == self.输入.音频流.序号):
+                    新包 = self.输入.复制包()
+                    self.输入.释放包()
+                    self._放队列(self._音频队列, (包, 新包))
+                else:
+                    self.输入.释放包()
+                self._刷码率()
+        except Exception as 错:  # noqa: BLE001
+            self._出错(f"解封装线程：{错}")
+
+    def _放队列(self, 队列: queue.Queue, 条目: tuple) -> None:
+        """放进队列（条目 = ``(元信息, 包指针)``）；队列满就等（背压），超时丢掉。"""
+        截止 = time.time() + 0.5
+        while not self._该停():
+            try:
+                队列.put(条目, timeout=0.05)
+                return
+            except queue.Full:
+                if time.time() > 截止:
+                    self.输入.释放新包(条目[1])
+                    return
+
+    def _取跳转请求(self) -> Optional[float]:
+        with self._跳转锁:
+            值 = self._跳转请求
+            self._跳转请求 = None
+            return 值
+
+    def _执行跳转(self, 秒: float) -> None:
+        起点 = max(0.0, 秒 - 0.05)
+        好 = self.输入.跳转(起点)
+        self._排空队列()
+        for 部件 in (self.视频, self.音频):
+            if 部件 is not None:
+                部件.冲刷()
+        self.时钟.重置(秒)
+        with self._锁:
+            self._最新帧 = None
+        self.统计.当前时间秒 = 秒
+        self._日志(f"[播放] 跳到 {秒:.1f}s（{'成功' if 好 else '容器不支持精确跳转'}）")
+
+    def _刷码率(self) -> None:
+        现在 = time.monotonic()
+        上次时刻, 上次字节 = self._码率基点
+        if 现在 - 上次时刻 >= 1.0:
+            增量 = self.统计.读入字节 - 上次字节
+            self.统计.码率bps = 增量 * 8 / max(0.001, 现在 - 上次时刻)
+            self._码率基点 = (现在, self.统计.读入字节)
+
+    def _视频循环(self) -> None:
+        try:
+            while not self._该停():
+                if not self._等一等():
+                    return
+                try:
+                    条目 = self._视频队列.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if 条目 == "冲刷":
+                    self.视频.送空包()
+                    self._收视频帧()
+                    continue
+                包, 新包 = 条目
+                try:
+                    self.视频.送包(新包)
+                finally:
+                    self.输入.释放新包(新包)
+                self._收视频帧()
+        except Exception as 错:  # noqa: BLE001
+            self._出错(f"视频线程：{错}")
+
+    def _收视频帧(self) -> None:
+        提前帧: Optional[解码.解码帧] = None
+        while True:
+            代码 = self.视频.收帧()
+            if 代码 < 0:
+                break
+            帧 = self.视频.取帧()
+            if 帧 is None:
+                continue
+            self.统计.已解视频帧 += 1
+            if 帧.时间秒 < 0:
+                帧.时间秒 = self.统计.当前时间秒
+            if not self._等到该显示(帧):
+                self.统计.已丢视频帧 += 1
+                continue
+            with self._锁:
+                self._最新帧 = 帧
+                self._帧序号 += 1
+            self.统计.当前时间秒 = 帧.时间秒
+        if 提前帧 is not None:
+            with self._锁:
+                self._最新帧 = 提前帧
+
+    def _等到该显示(self, 帧: 解码.解码帧) -> bool:
+        """按音频时钟等（或直接丢）。返回 False = 这帧太晚了，丢掉。"""
+        延迟 = self.输出.延迟秒() if self.输出 is not None else 0.0
+        while not self._该停():
+            if self._暂停.is_set():
+                time.sleep(0.01)
+                continue
+            现在 = self.时钟.现在秒(延迟)
+            差 = 帧.时间秒 - 现在
+            if 差 > 视频提前量:
+                time.sleep(min(0.02, max(0.002, 差 - 视频提前量)))
+                continue
+            if 差 < -丢帧阈值:
+                return False
+            return True
+        return False
+
+    def _音频循环(self) -> None:
+        try:
+            while not self._该停():
+                if not self._等一等():
+                    return
+                try:
+                    条目 = self._音频队列.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if 条目 == "冲刷":
+                    self.音频.送空包()
+                    self._收音频块()
+                    continue
+                包, 新包 = 条目
+                try:
+                    self.音频.送包(新包)
+                finally:
+                    self.输入.释放新包(新包)
+                self._收音频块()
+        except Exception as 错:  # noqa: BLE001
+            self._出错(f"音频线程：{错}")
+
+    def _收音频块(self) -> None:
+        while True:
+            代码 = self.音频.收帧()
+            if 代码 < 0:
+                break
+            块 = self.音频.取块()
+            if 块 is None:
+                continue
+            self.统计.已解音频块 += 1
+            数据 = self._按音量缩放(块.数据)
+            try:
+                self.输出.写(数据)
+            except Exception as 错:  # noqa: BLE001
+                self._日志(f"[音频] 写入失败：{错}")
+                return
+            self.时钟.记写入(块.样本数)
+            self.统计.已播音频秒 = self.时钟.现在秒(0.0)
+
+    def _按音量缩放(self, 数据: bytes) -> bytes:
+        """S16 音量缩放（纯 Python 但只做整数乘法，48kHz 立体声完全够快）。"""
+        音量 = self.音量
+        if abs(音量 - 1.0) < 0.001 or not 数据:
+            return 数据
+        样本数 = len(数据) // 2
+        数组 = (ctypes.c_int16 * 样本数).from_buffer_copy(数据)
+        for i in range(样本数):
+            值 = int(数组[i] * 音量)
+            数组[i] = -32768 if 值 < -32768 else (32767 if 值 > 32767 else 值)
+        return bytes(数组)
+
+    def _出错(self, 文本: str) -> None:
+        self.统计.状态 = 播放状态.出错
+        self.状态 = 播放状态.出错
+        self._日志(f"[播放] 出错：{文本}")
+
+    # ---------------- 结束判定 ----------------
+
+    def 是否结束(self) -> bool:
+        """文件放完了吗（解封装到头 + 队列空 + 音频写完了）。"""
+        if not self._结束.is_set():
+            return False
+        if not self._视频队列.empty() or not self._音频队列.empty():
+            return False
+        if self.输出 is not None and self.时钟.现在秒(0.0) < max(
+                0.0, self.统计.总时长秒 - 0.3):
+            return False
+        if self.状态 != 播放状态.结束:
+            self.状态 = 播放状态.结束
+            self.统计.状态 = self.状态
+            self._日志("[播放] 播放结束")
+        return True
+
+    def 截图(self, 路径: str) -> bool:
+        """把当前帧存成 PNG（画面是我们自己的数据，截图不需要问播放器）。"""
+        帧 = self.取最新帧()
+        if 帧 is None:
+            return False
+        try:
+            图 = 帧.转QImage()
+            return bool(图.save(str(路径)))
+        except Exception:  # noqa: BLE001
+            return False
