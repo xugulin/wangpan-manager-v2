@@ -70,10 +70,21 @@ jobs:
           # 这段是"用户视角"的验收：真解码、真出帧、真存图、真走一遍 HTTP。
           运行环境\venv\Scripts\python.exe 工具\windows真机验收.py
 
+      - name: 播放诊断（只出几帧时用来看卡在哪一环）
+        if: always()
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          运行环境\venv\Scripts\python.exe 工具\诊断播放.py
+          if ($LASTEXITCODE -ne 0) { Write-Host "（诊断显示出画面不足，继续打印日志）" }
+
       - name: 打印日志
         if: always()
         shell: pwsh
         run: |
-          foreach ($f in @('数据\真机验收.txt')) {
+          foreach ($f in @('数据\真机验收.txt', '数据\诊断播放.txt')) {
             if (Test-Path $f) { Write-Host "==== $f ===="; Get-Content $f -Encoding UTF8 }
           }
