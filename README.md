@@ -5,7 +5,18 @@
 
 V2 的核心主张是用户定的路线：**自己用 libav\* 写播放器**，而不是把窗口交给现成播放器。
 
-## 现在能跑什么（里程碑 M1，已完成）
+## 里程碑现状（M1–M6）
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M1 自研内核 | 解封装/解码/缩放/重采样 + 音频主时钟 + 自绘控件 + 播放/暂停/跳转/音量/截图/统计 | ✅ |
+| M2 硬解 | VAAPI / D3D11VA + 按显示尺寸缩放；失败自动回退软解 | ✅ |
+| M3 网络播放 | HTTP(S) Range、自定义头（UA/Referer/Cookie）、重连、打开失败降级、中断回调 | ✅ |
+| M4 字幕 | SRT/ASS 解析 + 自绘叠加（黑描边/位置/对齐/颜色）+ 自动找同名字幕 + 轨道轮换 | ✅ |
+| M5 体验 | 倍速、逐帧、播放记录与续播、播放列表（上一集/下一集）、键盘快捷键 | ✅ |
+| M6 网盘功能 | 适配器契约 + 本地/HTTP 适配器 + 多任务传输引擎（并发/暂停/取消/续传）+ 网盘页 | ✅（真实网盘适配器待接） |
+
+### 现在能跑什么
 
 * **自研解封装 / 解码 / 缩放 / 重采样**：ctypes 直连 `libavformat` / `libavcodec` /
   `libavutil` / `libswscale` / `libswresample`，**不调 ffmpeg 命令行、不用第三方 Python 绑定**；
@@ -37,16 +48,27 @@ QT_QPA_PLATFORM=offscreen 运行环境/venv/bin/python -m unittest discover -s t
 Windows 把 `avformat-*.dll` 等放进 `运行环境/libav/`）。测试造素材用系统 `ffmpeg` 命令，
 **播放本身不需要它**。
 
+### 主要验证数据（本机真机，4K60 HEVC）
+
+| 场景 | 结果 |
+|---|---|
+| 4K60 硬解播放（按显示尺寸输出 1280x544） | 300 帧 / 0 丢帧 / CPU ≈0.95 核（软解约 4~5 核） |
+| 4K60 走本地 HTTP 播放（带 Referer/Cookie） | 300 帧 / 0 丢帧 / CPU ≈0.5 核 / Range 请求 3 次 / 停止 0.19s |
+| 字幕 | 真机截图确认：`\an8` 顶部、`\c&H0000FF&` 显示为红色 |
+
 ## 目录
 
 ```
 启动.py / 启动.sh          入口（自举到自带 venv）
 wangpan/ffmpeg/            绑定：加载.py（找库）、绑定.py（原型 + 偏移读写）、偏移.py（自动生成）
 wangpan/player/            播放内核：解封装.py、解码.py、音频输出.py、引擎.py
-wangpan/ui/                界面：视频控件.py（自绘）、主窗口.py
+wangpan/subtitle/          字幕：模型.py、解析.py（SRT/ASS）、绘制.py
+wangpan/pan/               网盘适配器：接口.py（契约）、本地.py、http.py、工厂.py
+wangpan/transfer/          传输引擎：任务.py、引擎.py（并发/暂停/取消/续传）
+wangpan/ui/                界面：视频控件.py（自绘）、主窗口.py、网盘页.py
 tools/生成偏移.py          用 C 编译器的 offsetof 生成字段偏移（FFmpeg 换版本只需重跑它）
 tools/生成素材.py          造测试素材
-tests/                     绑定 / 解封装解码 / 引擎 / 独立性（18 条）
+tests/                     绑定/解码/硬解/引擎/网络/字幕/体验/网盘传输/独立性（95 条）
 docs/架构与路线图.md        设计说明与后续里程碑
 ```
 

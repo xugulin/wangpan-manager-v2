@@ -16,11 +16,13 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                             QMainWindow, QPushButton, QSlider, QVBoxLayout,
-                             QWidget)
+                             QMainWindow, QPushButton, QSlider, QTabWidget,
+                             QVBoxLayout, QWidget)
 
 from ..player.引擎 import 播放引擎, 播放状态
+from ..pan.工厂 import 建注册表
 from ..player.记录 import 记录本
+from .网盘页 import 网盘页
 from ..subtitle import (画字幕, 字幕轨道, 找同名字幕, 读字幕文件,
                       位置底部, 位置顶部)          # noqa: F401 - 字幕（M4）
 from .视频控件 import 视频控件
@@ -52,8 +54,8 @@ class 主窗口(QMainWindow):
         self.视频.双击.connect(self._切全屏)
         self.视频.单击.connect(self._切播放)
 
-        中央 = QWidget()
-        布局 = QVBoxLayout(中央)
+        播放页 = QWidget()
+        布局 = QVBoxLayout(播放页)
         布局.setContentsMargins(0, 0, 0, 0)
         布局.setSpacing(0)
         布局.addWidget(self.视频, 1)
@@ -116,7 +118,15 @@ class 主窗口(QMainWindow):
         行.addWidget(self.全屏按钮)
         条布局.addLayout(行)
         布局.addWidget(条)
-        self.setCentralWidget(中央)
+
+        # ---- 网盘页（M6）：左边网盘、右边传输，双击/播放按钮把直链交给播放器 ----
+        self.注册表 = 建注册表()
+        self.网盘页 = 网盘页(self.注册表)
+        self.网盘页.要播放.connect(self.播放直链)
+        self.标签 = QTabWidget()
+        self.标签.addTab(播放页, "▶ 播放")
+        self.标签.addTab(self.网盘页, "☁ 网盘")
+        self.setCentralWidget(self.标签)
 
         self.状态 = self.statusBar()
         self.状态.showMessage("就绪：打开一个视频文件即可播放（画面由本程序自己绘制）")
@@ -170,6 +180,22 @@ class 主窗口(QMainWindow):
         return True
 
     # ---------------- 槽 ----------------
+
+    def 播放直链(self, 地址: str, 请求头: dict | None = None) -> bool:
+        """播一路直链（网盘页/外部调用）。"""
+        try:
+            self.引擎.打开(地址, 请求头=请求头 or {})
+        except Exception as 错:  # noqa: BLE001
+            self.状态.showMessage(f"❌ 打不开：{错}")
+            return False
+        self.视频.清空()
+        self._字幕们 = []
+        self._字幕序号 = -1
+        self.引擎.播放()
+        self.播放按钮.setText("⏸ 暂停")
+        self.标签.setCurrentIndex(0)
+        self.状态.showMessage(f"▶ {self.引擎.统计.音视频}")
+        return True
 
     def _选文件(self) -> None:
         路径, _ = QFileDialog.getOpenFileName(
@@ -350,6 +376,10 @@ class 主窗口(QMainWindow):
         self._存档位置()                     # 关窗再存一次（别丢最后几秒）
         try:
             self.引擎.停止()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.网盘页.关闭()
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(事件)
