@@ -224,6 +224,17 @@ class 网络播放测试(unittest.TestCase):
             服务器.shutdown()
             服务器.server_close()
 
+    def test_中断回调真的装上了(self):
+        """回调没装上就等于没有防线（踩过：一处 ctypes 变量名写错，静默失败）。"""
+        from wangpan.player.解封装 import 输入
+        对象 = 输入.打开(str(self.素材))
+        try:
+            对象.装中断回调(lambda: False)
+            self.assertTrue(对象.中断回调已装, "中断回调必须真的写进 AVFormatContext")
+            self.assertIsNotNone(对象._中断回调)
+        finally:
+            对象.关闭()
+
     def test_卡住的服务器上停止不会卡死也不会崩(self):
         """服务器接了连接却不回数据（真实网络里很常见）：停止必须能打断阻塞的读。
 

@@ -78,6 +78,7 @@ class 输入:
     _包指针: int = 0
     _中断回调 = None            # 必须留引用：C 侧会一直持有这个函数指针
     _中断查询 = None
+    中断回调已装: bool = False
 
     # ---------------- 打开 / 关闭 ----------------
 
@@ -151,8 +152,9 @@ class 输入:
         地址 = _c.addressof(self._中断回调)
         # AVIOInterruptCB { int (*callback)(void*); void *opaque; }
         基 = self.格式指针 + 偏移表["AVFormatContext.interrupt_callback"]
-        ctypes.c_void_p.from_address(基).value = _c.c_void_p(地址).value
-        ctypes.c_void_p.from_address(基 + 8).value = None
+        _c.c_void_p.from_address(基).value = _c.c_void_p(地址).value
+        _c.c_void_p.from_address(基 + 8).value = None
+        self.中断回调已装 = True
 
     def _算帧率(self, 流: 流信息) -> float:
         """优先 avg_frame_rate，退化到 r_frame_rate（0/0 要挡住）。"""

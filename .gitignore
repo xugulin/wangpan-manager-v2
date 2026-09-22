@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 构建/发布/
+# 令牌是凭据，绝不进仓库
+数据/令牌_光鸭.json
+数据/网盘.json

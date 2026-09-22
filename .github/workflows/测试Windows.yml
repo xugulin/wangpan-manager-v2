@@ -1,0 +1,71 @@
+name: 测试（Windows 真机）
+
+# 为什么要有它：V2 的硬解在 Windows 上走 D3D11VA，而开发机是 Linux ——
+# 只有真 Windows runner 才能证明"能解码、能出画面、失败会回退软解"。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 装依赖（PySide6）/ 建自带运行环境
+        shell: pwsh
+        run: |
+          python -m venv 运行环境/venv
+          运行环境\venv\Scripts\python.exe -m pip install --upgrade pip
+          运行环境\venv\Scripts\python.exe -m pip install PySide6
+          运行环境\venv\Scripts\python.exe -c "import PySide6; print('PySide6', PySide6.__version__)"
+
+      - name: 下载 Windows 版 FFmpeg 运行库（libav* 的 DLL）
+        shell: pwsh
+        run: |
+          # V2 自己 dlopen libav*，所以只要 DLL 齐就行（不需要 ffmpeg.exe）
+          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip'
+          Invoke-WebRequest -Uri $url -OutFile ff.zip -TimeoutSec 900
+          Expand-Archive ff.zip -DestinationPath ffx -Force
+          New-Item -ItemType Directory -Force 运行环境\libav | Out-Null
+          $bin = Get-ChildItem ffx -Recurse -Directory -Filter bin | Select-Object -First 1
+          Copy-Item "$($bin.FullName)\av*.dll","$($bin.FullName)\sw*.dll" 运行环境\libav\ -Force
+          Get-ChildItem 运行环境\libav | Select-Object Name, Length | Format-Table
+
+      - name: 版本与自检（绑定能不能加载、ABI 对不对）
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          运行环境\venv\Scripts\python.exe -c "import sys; sys.path.insert(0,'.'); from wangpan.ffmpeg import 加载, 绑定; print('可用:', 加载.可用(), 加载.不可用原因()); print({k: 加载.版本文本(v) for k,v in 加载.库版本().items()}); print('路径:', {k: 加载.路径(k) for k in ('avformat','avcodec','avutil','swscale','swresample')}); 绑定.取绑定().检查ABI(); print('ABI 自检通过')"
+
+      - name: 单元测试（离屏 Qt）
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          运行环境\venv\Scripts\python.exe -m unittest discover -s tests -t . -v
+
+      - name: 真机播放测试（出画面 / 硬解或回退 / 截图 / 网络 Range）
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # 这段是"用户视角"的验收：真解码、真出帧、真存图、真走一遍 HTTP。
+          运行环境\venv\Scripts\python.exe 工具\windows真机验收.py
+
+      - name: 打印日志
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in @('数据\真机验收.txt')) {
+            if (Test-Path $f) { Write-Host "==== $f ===="; Get-Content $f -Encoding UTF8 }
+          }
