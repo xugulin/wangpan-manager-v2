@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +33,7 @@ from ..模型 import 弹幕池
 __all__ = [
     "弹幕源", "弹幕源错误", "素材信息", "匹配结果",
     "请求", "应答", "传输函数", "urlopen传输", "用户代理",
+    "取整数", "取浮点",
 ]
 
 #: 请求 UA（有些网关会挡空 UA；带上自己的名字也方便对方识别）
@@ -40,6 +42,49 @@ __all__ = [
 
 class 弹幕源错误(Exception):
     """源相关的失败（网络、协议、业务错误码、文件坏了）—— 上层统一 catch 这一个。"""
+
+
+# ---------------------------------------------------------------------------
+# 文本取数（两个源的协议字段都是**文本**，解析规则共享一份）
+# ---------------------------------------------------------------------------
+
+def 取整数(值, 默认: Optional[int] = None) -> Optional[int]:
+    """宽容地取整数：``"4"`` / ``"4.0"`` / ``4`` 都行；取不到给默认值。
+
+    为什么要宽容：官方 ``p`` 字段和 XML 属性都是文本，实测有工具把模式写成
+    ``"4.0"``、把字号写成 ``" 25"``；严格 ``int()`` 会把这些整条丢掉。
+    ``bool`` 必须单独挡掉 —— Python 里 ``True`` 是 ``int`` 的实例，会把
+    "模式=true" 变成模式 1。
+    """
+    if isinstance(值, bool):
+        return 默认
+    if isinstance(值, int):
+        return 值
+    if isinstance(值, float):
+        return int(值) if math.isfinite(值) else 默认
+    文本 = str(值 if 值 is not None else "").strip()
+    if not 文本:
+        return 默认
+    try:
+        return int(文本)
+    except ValueError:
+        pass
+    try:
+        数 = float(文本)
+    except ValueError:
+        return 默认
+    return int(数) if math.isfinite(数) else 默认
+
+
+def 取浮点(值, 默认: Optional[float] = None) -> Optional[float]:
+    """宽容地取浮点；``nan`` / ``inf`` 当取不到（它们能"解析成功"但后面一转 int 就炸）。"""
+    if isinstance(值, bool):
+        return 默认
+    try:
+        数 = float(str(值 if 值 is not None else "").strip())
+    except (TypeError, ValueError):
+        return 默认
+    return 数 if math.isfinite(数) else 默认
 
 
 # ---------------------------------------------------------------------------
