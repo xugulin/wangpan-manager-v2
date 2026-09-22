@@ -19,6 +19,8 @@ __all__ = ["本地适配器"]
 class 本地适配器(适配器):
     名字 = "本地文件夹"
     能力 = {"列出", "直链", "下载", "上传", "删除", "建目录"}
+    #: 上传能续传（目标已有半截就接着写；引擎据此可以在中断后重试）
+    支持续传上传 = True
 
     def __init__(self, 根: str | Path) -> None:
         self.根 = Path(根).expanduser().resolve()
@@ -88,8 +90,18 @@ class 本地适配器(适配器):
         目标 = self._解析(远端路径)
         目标.parent.mkdir(parents=True, exist_ok=True)
         总数 = 来源.stat().st_size
-        已写 = 0
-        with open(来源, "rb") as 读, open(目标, "wb") as 写:
+        # 续传：目标已经有半截就接着写（上传中断重来很常见，尤其在网盘上）
+        已写 = 目标.stat().st_size if 目标.is_file() else 0
+        if 已写 > 总数:                      # 比源还大 = 脏数据，从头来
+            已写 = 0
+        if 已写 == 总数 and 总数 > 0:
+            if 进度回调 is not None:
+                进度回调(总数, 总数)
+            return 目标
+        with open(来源, "rb") as 读, open(目标, "ab" if 已写 else "wb") as 写:
+            读.seek(已写)
+            if 进度回调 is not None:
+                进度回调(已写, 总数)
             while True:
                 if 取消 is not None and 取消():
                     raise 不支持("已取消")

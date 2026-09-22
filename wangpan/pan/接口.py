@@ -81,6 +81,8 @@ class 适配器:
     名字 = "未命名"
     #: 能力声明（界面据此灰按钮）
     能力: set[str] = set()
+    #: 上传能否从"远端已有的大小"接着传（本地/对象存储可以，普通 HTTP 表单不行）
+    支持续传上传 = False
 
     def 信息(self) -> dict:
         return {"名字": self.名字, "能力": sorted(self.能力)}

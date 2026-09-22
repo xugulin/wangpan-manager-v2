@@ -320,3 +320,43 @@ class 分段下载测试(unittest.TestCase):
         self.assertTrue(引擎.等待全部(60))
         self.assertEqual(任务.状态, 状态.完成)
         self.assertEqual(落点.read_bytes(), self.内容)
+
+
+class 上传续传测试(unittest.TestCase):
+    """上传中断后重试要接着传，而不是从头覆盖（大文件上这很要命）。"""
+
+    def setUp(self):
+        self.临时 = 临时目录()
+        self.addCleanup(self.临时.cleanup)
+        self.根 = Path(self.临时.name) / "云盘"
+        self.根.mkdir()
+        self.盘 = 本地适配器(self.根)
+        self.本地 = Path(self.临时.name) / "源.bin"
+        self.本地.write_bytes(bytes(range(256)) * 4096)      # 1 MB
+
+    def test_声明了支持续传(self):
+        self.assertTrue(self.盘.支持续传上传)
+
+    def test_目标已有半截时接着写(self):
+        目标 = self.根 / "已存在.bin"
+        总量 = self.本地.stat().st_size
+        目标.write_bytes(self.本地.read_bytes()[:总量 // 2])   # 假装上次传了一半
+        进度: list = []
+        self.盘.上传(self.本地, "/已存在.bin", lambda 已, 总: 进度.append((已, 总)))
+        self.assertEqual(目标.read_bytes(), self.本地.read_bytes(), "续传后内容要完全一致")
+        self.assertEqual(进度[0][0], 总量 // 2, "第一条进度应该是从已有的大小开始")
+
+    def test_已经传完就不重复写(self):
+        目标 = self.根 / "完整.bin"
+        目标.write_bytes(self.本地.read_bytes())
+        时间戳 = 目标.stat().st_mtime_ns
+        进度: list = []
+        self.盘.上传(self.本地, "/完整.bin", lambda 已, 总: 进度.append((已, 总)))
+        self.assertEqual(目标.stat().st_mtime_ns, 时间戳, "已经完整就不该再写一遍")
+        self.assertEqual(进度[-1][0], 目标.stat().st_size)
+
+    def test_目标比源还大时从头来(self):
+        目标 = self.根 / "脏.bin"
+        目标.write_bytes(b"x" * (self.本地.stat().st_size + 100))
+        self.盘.上传(self.本地, "/脏.bin")
+        self.assertEqual(目标.read_bytes(), self.本地.read_bytes())
