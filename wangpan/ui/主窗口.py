@@ -55,6 +55,7 @@ class 主窗口(QMainWindow):
 
         self.视频 = 视频控件()
         self.视频.设置弹幕控制器(self.弹幕)      # 弹幕画在画面之上（视频控件负责绘制）
+        self.读弹幕设置()                       # 载入上次的观感/过滤规则
         self.视频.双击.connect(self._切全屏)
         self.视频.单击.connect(self._切播放)
 
@@ -97,6 +98,10 @@ class 主窗口(QMainWindow):
         self.弹幕按钮.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.弹幕按钮.customContextMenuRequested.connect(self._弹幕菜单)
         行.addWidget(self.弹幕按钮)
+        self.弹幕设置按钮 = QPushButton("⚙ 弹幕设置")
+        self.弹幕设置按钮.setToolTip("字号/速度/不透明度/时间轴/过滤规则（可导入导出）")
+        self.弹幕设置按钮.clicked.connect(self._开弹幕设置)
+        行.addWidget(self.弹幕设置按钮)
         self.找弹幕按钮 = QPushButton("⬇ 找弹幕")
         self.找弹幕按钮.setToolTip("按文件名到弹弹play 找这一集的弹幕（需要 AppId；见 数据/弹幕源.json）")
         self.找弹幕按钮.clicked.connect(self._装载弹幕)
@@ -172,6 +177,7 @@ class 主窗口(QMainWindow):
             self.海报墙 = 海报墙页(self.资料库, self.图片缓存)
             self.海报墙.要播放.connect(self._播放库里的文件)
             self.海报墙.要刮削.connect(self._刮削路径)
+            self.海报墙.要手动匹配.connect(self._开手动匹配)
             self.标签.addTab(self.海报墙, "🎞 媒体库")
         except Exception as 错:  # noqa: BLE001
             self.资料库 = None
@@ -514,7 +520,8 @@ class 主窗口(QMainWindow):
                 return
         self.状态.showMessage(f"🗨 {结果.说明 or '没找到弹幕'}")
 
-    def _刮削路径(self, 路径: str) -> None:
+    def _刮削路径(self, 路径: str, 强制标识: str = "",
+               强制类型=None) -> None:
         """刮一个目录/文件：在**后台线程**里跑，界面只显示进度（别卡住 UI）。
 
         为什么用线程 + 进度框：刮削要联网、要下图，几秒钟到几分钟都有可能；
@@ -559,7 +566,10 @@ class 主窗口(QMainWindow):
                         进度回调=lambda p: 结果盒.setdefault("进度", p.摘要()),
                         日志回调=self._写日志)
                     服务.扫库([路径])
-                    结果盒["结果"] = 服务.续跑()
+                    if 强制标识:
+                        结果盒["结果"] = 服务.刮路径(路径, 强制标识, 强制类型)
+                    else:
+                        结果盒["结果"] = 服务.续跑()
                     结果盒["统计"] = 库.统计().摘要()
                     服务.关闭()
                     库.关闭()
@@ -586,6 +596,147 @@ class 主窗口(QMainWindow):
                              + f"｜{结果盒.get('统计', '')}")
         线程.finished.connect(收尾)
         线程.start()
+
+    # ---------------- 弹幕设置（持久化到 数据/弹幕设置.json）----------------
+
+    def _弹幕设置路径(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "数据" / "弹幕设置.json"
+
+    def 读弹幕设置(self) -> None:
+        """启动时把上次的观感/过滤规则装上（坏了就用默认，不影响播放）。"""
+        try:
+            路径 = self._弹幕设置路径()
+            if not 路径.is_file():
+                return
+            import json as _json
+            数据 = _json.loads(路径.read_text(encoding="utf-8"))
+            from ..danmaku.过滤 import 过滤规则, 过滤器
+            from ..danmaku.模型 import 弹幕配置
+            配置字段 = {k: v for k, v in (数据.get("配置") or {}).items()
+                     if k in 弹幕配置.__dataclass_fields__}
+            if 配置字段:
+                self.弹幕.配置 = self.弹幕.配置.复制(**配置字段)
+                self.弹幕.渲染器.设置配置(self.弹幕.配置)
+            规则字段 = {k: v for k, v in (数据.get("规则") or {}).items()
+                     if k in 过滤规则.__dataclass_fields__}
+            if 规则字段:
+                self.弹幕.设置过滤器(过滤器(过滤规则(**规则字段)))
+            self._写日志("[弹幕] 已载入上次的弹幕设置")
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[弹幕] 读设置失败（用默认）：{错}")
+
+    def 存弹幕设置(self) -> None:
+        try:
+            import json as _json
+            from dataclasses import asdict
+            路径 = self._弹幕设置路径()
+            路径.parent.mkdir(parents=True, exist_ok=True)
+            规则 = getattr(self.弹幕._过滤器, "规则", None)
+            路径.write_text(_json.dumps(
+                {"配置": asdict(self.弹幕.配置),
+                 "规则": asdict(规则) if 规则 is not None else {}},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[弹幕] 存设置失败：{错}")
+
+    def _开弹幕设置(self) -> None:
+        """弹幕设置面板（非模态窗口），改完立刻生效并落盘。"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from ..danmaku.过滤 import 过滤器, 过滤规则
+        from .弹幕设置 import 弹幕设置面板
+        if getattr(self, "_弹幕设置窗", None) is not None:
+            self._弹幕设置窗.show()
+            self._弹幕设置窗.raise_()
+            return
+        规则 = getattr(self.弹幕._过滤器, "规则", None) or 过滤规则()
+        窗 = QDialog(self)
+        窗.setWindowTitle("弹幕设置")
+        窗.resize(560, 720)
+        布局 = QVBoxLayout(窗)
+        面板 = 弹幕设置面板(self.弹幕.配置, 规则, 窗)
+        布局.addWidget(面板)
+
+        def 配置变了(新配置):
+            self.弹幕.设置显示(bool(新配置.显示))
+            self.弹幕.配置 = 新配置
+            self.弹幕.渲染器.设置配置(新配置)
+            self.弹幕按钮.setChecked(bool(新配置.显示))
+            self.存弹幕设置()
+            self.状态.showMessage("🗨 弹幕设置：" + 新配置.摘要())
+
+        def 规则变了(新规则):
+            self.弹幕.设置过滤器(过滤器(新规则))
+            self.存弹幕设置()
+            self.状态.showMessage(f"🗨 过滤规则已更新（屏蔽词 {len(新规则.屏蔽词)} 条、"
+                             f"正则 {len(新规则.正则们)} 条）")
+        面板.配置变化.connect(配置变了)
+        面板.规则变化.connect(规则变了)
+        self._弹幕设置窗 = 窗
+        窗.show()
+
+    # ---------------- 手动匹配（TMDB 搜不到/匹配错时用）----------------
+
+    def _开手动匹配(self, 媒体id: int) -> None:
+        from .手动匹配 import 手动匹配对话框
+        from .手动资料 import 手动资料对话框
+        条目 = self.资料库.取媒体(int(媒体id)) if self.资料库 is not None else None
+        类型 = 条目.类型 if 条目 is not None else None
+        客户端 = self._建TMDB客户端()
+        对话 = 手动匹配对话框(客户端, (条目.标题 if 条目 else "") or "",
+                        (条目.年份 if 条目 else None), 类型 or 媒体类型.电影, self)
+        要手动 = {"要": False}
+
+        def 手动():
+            要手动["要"] = True
+        对话.要手动填写.connect(手动)
+        对话.exec()
+        if 要手动["要"]:
+            self._开手动资料(媒体id)
+            return
+        选择 = 对话.取选择()
+        if 选择 is None or not 选择.标识:
+            return
+        文件 = self._找媒体主文件(媒体id)
+        if not 文件:
+            self.状态.showMessage("🎞 这条资料没有对应的本地文件，改不了")
+            return
+        self._写日志(f"[刮削] 手动指定 {选择.可读()}")
+        self._刮削路径(str(文件), 强制标识=选择.标识, 强制类型=选择.类型)
+
+    def _开手动资料(self, 媒体id: int) -> None:
+        """手动填写/修改资料（**不需要网络**）。"""
+        from .手动资料 import 手动资料对话框
+        if self.资料库 is None:
+            return
+        对话 = 手动资料对话框(self.资料库, self.图片缓存,
+                        int(媒体id) if 媒体id else None, self)
+        if 对话.exec() and 对话.取条目() is not None:
+            新id = int(媒体id) if 媒体id else None
+            if self.海报墙 is not None:
+                self.海报墙.刷新()
+            self.状态.showMessage("🎞 资料已保存（手动填写）"
+                             + (f"，媒体 id {新id}" if 新id else ""))
+
+    def _找媒体主文件(self, 媒体id: int) -> str:
+        try:
+            文件们 = self.资料库.文件们(int(媒体id))
+            for 行 in 文件们:
+                if 行["是主文件"]:
+                    return str(行["路径"])
+            return str(文件们[0]["路径"]) if 文件们 else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _建TMDB客户端(self):
+        try:
+            from ..scrape.tmdb import TMDB客户端, TMDB配置
+            配置 = TMDB配置.从环境与配置()
+            if not (配置.token or 配置.api_key):
+                return None
+            return TMDB客户端(配置)
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[刮削] 建 TMDB 客户端失败：{错}")
+            return None
 
     def _播放库里的文件(self, 路径: str) -> None:
         self.标签.setCurrentIndex(0)
@@ -688,12 +839,27 @@ class 主窗口(QMainWindow):
 
     def closeEvent(self, 事件):  # noqa: N802 - Qt 命名
         self._存档位置()                     # 关窗再存一次（别丢最后几秒）
+        self.存弹幕设置()                     # 弹幕观感/过滤规则也存一下
         try:
             self.引擎.停止()
         except Exception:  # noqa: BLE001
             pass
         try:
             self.网盘页.关闭()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # ⚠️ 顺序要紧：**先停海报墙的工作线程，再关库**。
+            #    QThread 还在跑就被析构 = 进程直接 abort（真机退出时崩过：
+            #    "QThread: Destroyed while thread is still running"）。
+            if getattr(self, "海报墙", None) is not None:
+                self.海报墙.关闭()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            线 = getattr(self, "_刮削线程", None)
+            if 线 is not None and 线.isRunning():
+                线.wait(3000)
         except Exception:  # noqa: BLE001
             pass
         try:

@@ -115,6 +115,8 @@ class 刮削服务:
         self._进度回调 = 进度回调 or (lambda _p: None)
         self._日志 = 日志回调 or (lambda _t: None)
         self._取消 = threading.Event()
+        #: 手动匹配选中的 (tmdb id, 类型)；非空时跳过搜索直接用
+        self._强制: tuple[str, 媒体类型 | None] = ("", None)
         self._线程池 = ThreadPoolExecutor(max_workers=4,
                                     thread_name_prefix="V2-刮削图")
 
@@ -180,11 +182,20 @@ class 刮削服务:
         self._日志(f"[刮削] 本批完成：{结果.摘要()}")
         return 结果
 
-    def 刮路径(self, 路径: Path | str) -> 服务结果:
-        """刮单个路径（右键"重新刮削"用）。"""
+    def 刮路径(self, 路径: Path | str, 强制标识: str = "",
+             强制类型: 媒体类型 | None = None) -> 服务结果:
+        """刮单个路径（右键"重新刮削"、或"手动匹配选中某个 id"用）。
+
+        :param 强制标识: 非空时**跳过搜索**，直接按这个 TMDB id 取详情（手动匹配的落点）。
+        :param 强制类型: 配合 强制标识 决定走电影还是剧集接口。
+        """
         结果 = 服务结果()
         self.进度 = 刮削进度(总数=1)
-        self._刮一个(Path(路径), 结果)
+        self._强制 = (str(强制标识 or ""), 强制类型)
+        try:
+            self._刮一个(Path(路径), 结果)
+        finally:
+            self._强制 = ("", None)
         self.进度.已完成 = 1
         self._进度回调(self.进度)
         return 结果
@@ -204,9 +215,12 @@ class 刮削服务:
         条目.年份 = 条目.年份 or 单元.年份
         self._日志(f"[刮削] {单元.一句话()}")
 
-        # ---- 1) 已有 ID 直接取详情 ----
+        # ---- 1) 已有 ID（或手动指定的 ID）直接取详情 ----
         在线 = None
-        id文本 = 单元.数据源ID or 条目.外部ID.get("tmdb", "")
+        强制标识, 强制类型 = self._强制
+        id文本 = str(强制标识 or 单元.数据源ID or 条目.外部ID.get("tmdb", ""))
+        if 强制类型 is not None:
+            单元.类型 = 强制类型
         if self.客户端 is not None and self.客户端.可用() and id文本:
             try:
                 在线 = (self.客户端.取剧集(id文本) if 单元.类型 is 媒体类型.剧集
