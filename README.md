@@ -39,10 +39,44 @@ V2 的核心主张是用户定的路线：**自己用 libav\* 写播放器**，�
 ## 怎么跑
 
 ```bash
-./启动.sh                       # 空窗口，点「📂 打开文件」
+./启动.sh                          # 空窗口，点「📂 打开文件」
+一键启动_网盘管理_V2.sh             # 一键启动（文件管理器里双击也行）
+一键启动_网盘管理_V2.sh --check      # 只自检：解释器 / PySide6 / libav*（排查"双击没反应"）
+一键启动_网盘管理_V2.sh 某个视频.mp4  # 直接开播
 运行环境/venv/bin/python 启动.py 某个视频.mp4
 QT_QPA_PLATFORM=offscreen 运行环境/venv/bin/python -m unittest discover -s tests -t .
 ```
+
+### 一键启动快捷方式（桌面图标 + 应用菜单）
+
+```bash
+工具/安装快捷方式.sh              # 装：桌面图标 + 应用菜单 + 图标主题（可重复执行）
+工具/安装快捷方式.sh --查看        # 看看现在装了什么、指向哪里
+工具/安装快捷方式.sh --不桌面      # 只装菜单项
+工具/安装快捷方式.sh --卸载        # 只删自己装的那几个文件
+```
+
+装完在「应用程序」里搜 **网盘管理** 就能看到，桌面上也会出现 `一键启动_网盘管理_V2.desktop`，
+双击即启动（`Exec` 直接指向本项目的一键启动脚本，`Path` 是项目根，`%F` 支持"用这个程序打开视频文件"）。
+
+* **图标是自己画的**（`工具/生成图标.py`，QPainter，无第三方素材）：仓库根一份
+  `网盘管理_V2_图标.png`（快捷方式直接用它，与 V1 的做法一致）、`资源/图标/hicolor/*`
+  （6 个尺寸，装进 `~/.local/share/icons/hicolor/`，菜单/任务栏才不是通用 Python 图标）、
+  `资源/图标/网盘管理_V2.ico`（Windows）。
+* **任务栏认人**：`启动.py` 里设了 `setApplicationName("网盘管理V2")` +
+  `setDesktopFileName("网盘管理_V2")` + 窗口图标，`.desktop` 里的 `StartupWMClass`
+  与它一致 —— 不然任务栏会把窗口显示成"又一个 python"。
+* **Windows**：`启动.bat`（双击即启动，**GBK 编码**——中文 Windows 控制台默认 936，
+  存 UTF-8 反而乱码）+ `工具\安装快捷方式.ps1`（桌面 + 开始菜单，目标用 `pythonw.exe`
+  所以不弹黑窗口，**UTF-8 with BOM**——PowerShell 5.1 靠 BOM 认 UTF-8）：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File 工具\安装快捷方式.ps1
+  powershell -ExecutionPolicy Bypass -File 工具\安装快捷方式.ps1 -卸载
+  ```
+* 两个 shell 脚本**只用 POSIX 语法 + ASCII 标识符**：有的文件管理器会用非 bash 的
+  shell 解析它，`要桌面=1` 这种中文变量名会被当成命令执行（dash 报 "未找到命令"，
+  然后桌面图标根本没装成）。`tests/test_快捷方式.py` 会逐行扫这个坑、并在临时 HOME 里
+  **真跑一遍安装**，再用 `desktop-file-validate` 校验。
 
 依赖：**Python 3.11+、PySide6（V2 自己的 venv 里）、系统 libav\***（Linux 装 `ffmpeg` 包即可；
 Windows 把 `avformat-*.dll` 等放进 `运行环境/libav/`）。测试造素材用系统 `ffmpeg` 命令，
@@ -190,7 +224,7 @@ NFO 内容也是真的：`<title>沙丘</title> <originaltitle>Dune</originaltit
 
 ```
 偏移表主版本：63｜运行时 avcodec 主版本：63       ← 大版本一致性自检
-单元测试：Ran 598 tests … OK (skipped=1)
+单元测试：Ran 613 tests … OK (skipped=1)
 真机验收（工具/windows真机验收.py）：结论 通过
   【本地文件】帧数 20、有帧 True、尺寸 (320,180)、截图 True、暂停有效 True、跳转生效
   【网络】    帧数 20、有帧 True、尺寸 (320,180)、截图 True、暂停有效 True、跳转生效
@@ -213,7 +247,9 @@ NFO 内容也是真的：`<title>沙丘</title> <originaltitle>Dune</originaltit
 ## 目录
 
 ```
-启动.py / 启动.sh          入口（自举到自带 venv）
+启动.py / 启动.sh / 启动.bat / 一键启动_网盘管理_V2.sh
+                           入口（自举到自带 venv）；一键启动脚本双击可用、带 --check
+网盘管理_V2_图标.png        快捷方式图标（工具/生成图标.py 生成，可重新生成）
 wangpan/ffmpeg/            绑定：加载.py（找库）、绑定.py（原型 + 偏移读写）、偏移.py（自动生成）
 wangpan/player/            播放内核：解封装.py、解码.py、音频输出.py、引擎.py
 wangpan/subtitle/          字幕：模型.py、解析.py（SRT/ASS）、绘制.py
@@ -230,7 +266,7 @@ tools/生成偏移.py          用 C 编译器的 offsetof 生成字段偏移（
 tools/生成素材.py          造测试素材
 tests/                     绑定/解码/硬解/引擎/网络/字幕/体验/网盘传输/独立性/弹幕引擎/弹幕源/
                            弹幕过滤匹配/弹幕记忆/弹幕设置/TMDB客户端/TMDB真HTTP/命名解析/匹配打分/
-                           刮削流水线/待确认队列/海报墙/手动资料/状态栏（598 条）
+                           刮削流水线/待确认队列/海报墙/手动资料/状态栏/快捷方式（613 条）
 tests/假TMDB服务.py        环回口上的假 TMDB（真 HTTP，单测与真机脚本共用）
 docs/研究/                  Animeko 弹幕、Jellyfin/Emby/Vidhub 播放与刮削的调研（只参考，不用其代码）
 docs/架构与路线图.md        设计说明与后续里程碑

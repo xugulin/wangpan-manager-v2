@@ -59,11 +59,38 @@ def main() -> int:
           "、".join(f"{k} {v}" for k, v in 版本.items()), flush=True)
 
     应用 = QApplication(sys.argv[:1])
+    _设应用标识(应用, 项目根)
     窗口 = 主窗口()
     窗口.show()
     if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
         窗口.打开(sys.argv[1])
     return 应用.exec()
+
+
+def _设应用标识(应用, 根: Path) -> None:
+    """给窗口一个**稳定的名字与图标**（快捷方式/任务栏靠它认人）。
+
+    为什么必须显式设置：不设的话 Qt 用脚本名（``启动``）当 WM_CLASS，
+    桌面环境会把窗口和快捷方式对不上号 —— 任务栏显示通用 Python 图标、
+    ``StartupWMClass`` 也没法写死。设了之后：
+    * ``WM_CLASS`` = ``网盘管理V2``（与 .desktop 的 StartupWMClass 一致）；
+    * Wayland/GNOME 系还能靠 ``setDesktopFileName`` 与 .desktop 关联；
+    * 窗口/任务栏图标用我们自己生成的 PNG（没有就用系统默认，绝不因此启动失败）。
+    """
+    try:
+        应用.setApplicationName("网盘管理V2")
+        应用.setApplicationDisplayName("网盘管理 V2")
+        应用.setOrganizationName("WangpanV2")
+        应用.setDesktopFileName("网盘管理_V2")
+        from PySide6.QtGui import QIcon
+        图 = 根 / "网盘管理_V2_图标.png"
+        if 图.is_file():
+            图标 = QIcon(str(图))
+            if not 图标.isNull():
+                应用.setWindowIcon(图标)
+    except Exception:  # noqa: BLE001 - 图标/名字出问题不该让程序起不来
+        pass
+
 
 
 if __name__ == "__main__":
