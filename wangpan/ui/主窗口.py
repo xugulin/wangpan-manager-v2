@@ -226,6 +226,21 @@ class 主窗口(QMainWindow):
                 self.状态.showMessage(f"🗨 已加载本地弹幕 {len(本地弹幕)} 条")
         except Exception:  # noqa: BLE001
             pass
+        # 有逐集记忆就直接装好（不联网、不搜索）：老片子重开时弹幕应当自动就位。
+        # 没记忆也不自动搜（免得每次打开都去打人家接口），让用户点「⬇ 找弹幕」。
+        try:
+            记录 = self.弹幕.记忆.取(Path(路径))
+            if 记录 is not None and 记录.标识:
+                from ..danmaku.源.接口 import 素材信息
+                集号 = int(记录.集号) if str(记录.集号).isdigit() else None
+                装载 = self.弹幕.装载(素材信息(
+                    路径=Path(路径), 文件名=Path(路径).name,
+                    时长秒=self.引擎.统计.总时长秒, 标题=记录.标题 or "", 集号=集号))
+                if 装载.成功:
+                    self.状态.showMessage(f"🗨 从记忆自动装好 {装载.条数} 条"
+                                     f"（{记录.标题} {记录.集标题}）")
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[弹幕] 用记忆装载失败（不影响播放）：{错}")
         # M5：记住"看过哪儿"，下次接着播
         try:
             时长 = self.引擎.统计.总时长秒
@@ -452,8 +467,28 @@ class 主窗口(QMainWindow):
         from ..danmaku.源 import 建默认源
         from ..danmaku.源.接口 import 素材信息
         地址 = str(self.引擎.输入.地址)
-        素材 = 素材信息(路径=Path(地址) if Path(地址).is_file() else None,
-                    文件名=Path(地址).name, 时长秒=self.引擎.统计.总时长秒)
+        # ⚠️ 必须先把文件名解析出"季/集"再送去匹配：
+        #    只给文件名时，匹配打分拿不到集号 → 分数压在 78 上下、还要人工确认，
+        #    而且可能选中特别篇（真机实测：S01E01 被选成了 sort=0 的 SP）。
+        路径 = Path(地址) if Path(地址).is_file() else None
+        标题 = ""
+        季号 = 集号 = None
+        附属: dict = {}
+        try:
+            from ..scrape.命名解析 import 解析 as 解析文件名
+            解析结果 = 解析文件名(Path(地址).name,
+                             父目录名=路径.parent.name if 路径 else "",
+                             季目录名=路径.parent.name if 路径 else "")
+            标题 = 解析结果.标题 or ""
+            季号, 集号 = 解析结果.季, 解析结果.集
+            附属 = {"集标题": "", "季号": 季号, "集号": 集号}
+        except Exception as 错:  # noqa: BLE001
+            self._写日志(f"[弹幕] 文件名解析失败（不影响继续找）：{错}")
+        素材 = 素材信息(路径=路径, 文件名=Path(地址).name,
+                    时长秒=self.引擎.统计.总时长秒, 标题=标题,
+                    季号=季号, 集号=集号, 额外=附属)
+        self._写日志(f"[弹幕] 素材：{Path(地址).name}｜标题「{标题}」"
+                   f"｜季 {季号}｜集 {集号}")
         self.状态.showMessage("🗨 正在找弹幕…")
         应用 = QApplication.instance()
         if 应用 is not None:

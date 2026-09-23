@@ -163,6 +163,25 @@ class 渲染测试(unittest.TestCase):
                 if (图.pixel(x, y) & 0xFFFFFF) != 0)
         return 条数, 亮, 平滑
 
+    def test_还没设置弹幕池就画也不崩(self):
+        """真机踩到的坑：界面先接控制器、第一帧就 paintEvent，此时还没装弹幕池。
+
+        之前 `_装载表` 只在 `清空()` 里初始化 → 直接 AttributeError（在 paintEvent 里抛，
+        表现是整个窗口画不出来）。
+        """
+        渲染 = 弹幕渲染器(弹幕配置())
+        图 = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+        图.fill(0xFF000000)
+        画 = QPainter(图)
+        try:
+            渲染.推进(1000, 320, 180)          # 没池子
+            self.assertEqual(渲染.绘制(画, 320, 180, 1000), 0)
+        finally:
+            画.end()
+        # 池子设为 None 也要能画
+        渲染.设置弹幕池(None, 1000)
+        self.assertEqual(渲染.绘制(QPainter(图), 320, 180, 1000), 0)
+
     def test_真的画上去了(self):
         渲染 = 弹幕渲染器(弹幕配置())
         渲染.设置弹幕池(造池(40), 现在毫秒=0)
