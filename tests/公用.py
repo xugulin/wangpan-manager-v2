@@ -14,8 +14,14 @@ if str(项目根) not in sys.path:
     sys.path.insert(0, str(项目根))
 
 #: 离屏跑 Qt（没有 DISPLAY 时）
-if not os.environ.get("DISPLAY") and os.name != "nt":
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY") \
+        and os.name != "nt":
+    # ⚠️ 这里**不能**用 `setdefault`：有些环境会预先设 `QT_QPA_PLATFORM=wayland;xcb`
+    #    （哪怕根本没有显示服务），setdefault 就不会覆盖它，于是 Qt 加载平台插件失败、
+    #    整个测试进程 core dump。没有显示服务时**强制离屏**才是对的。
+    当前 = (os.environ.get("QT_QPA_PLATFORM") or "").lower()
+    if "offscreen" not in 当前 and "minimal" not in 当前:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 
 #: 随仓库带的小素材（几十 KB）：没有 ffmpeg 命令时用它，测试就不再"跳过"

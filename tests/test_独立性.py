@@ -1,126 +1,158 @@
-"""独立性：V2 **不许**依赖 V1 或任何其它项目（用户明确的硬要求）。
+"""整合后的架构约束（**替换掉原来那份"V2 与 V1 完全隔离"的判据**）。
 
-判据是"扫源码"：出现 V1 的路径、V1 的包名、V1 的解释器路径就算违规。
-（V2 有自己的 运行环境/venv，这里的检查针对的是 **V1** 的绝对路径。）
+背景
+====
+V2 早期有一条硬路线："与 V1 完全独立，禁止出现 v8_3 的路径/包名"。
+现在用户明确要求**整合**：以 V2 仓库为主体，套用 V1 的 GUI / 网盘管理 / AI，
+播放页与播放器用 V2 的自研内核。所以"整仓不许提 V1"这条判据已经不成立。
+
+但**内核独立**这条不能丢 —— 它是"自己用 libav* 写播放器"这句话的技术底线。
+于是判据改成下面四条：
+
+1. **内核不许依赖界面层**：`wangpan/player|ffmpeg|subtitle|danmaku|scrape|pan|transfer`
+   不 import `v8_3`（内核永远能脱离 GUI 单独跑、单独测）；
+2. **纯内核壳不许依赖界面层**：`wangpan/ui/主窗口.py` 不 import `v8_3`
+   （`启动.py --纯播放` 那条回归路径必须真的独立）；
+3. **播放不许调外部播放器命令行**：内核与播放页/会话里不许出现
+   `ffmpeg` / `ffprobe` / `vlc` 的 subprocess 调用。
+   （`v8_3/播放/媒体信息.py` 用 ffprobe 是**读元数据**给 AI 顾问用，不属于播放路径，
+   它也不在扫描范围里 —— 这条区分很重要，别把两件事混起来。）
+4. **内核只许用标准库 + PySide6**：`wangpan/` 里不出现第三方依赖。
+   整合进来的第三方（httpx 等）只允许出现在 `v8_3/`（V1 那一层）。
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
 
 from tests.公用 import 项目根
 
-#: 不许出现的东西（V1 的路径/包名）
-禁用 = (
-    "网盘管理/v8_3",            # V1 的包
-    "/home/xgl/python/网盘管理/",  # V1 的绝对路径（注意 V2 是 网盘管理_V2）
-    "from v8_3",
-    "import v8_3",
-)
+#: V2 内核包（必须保持"不依赖界面层、不引第三方"）
+内核目录 = ("wangpan/player", "wangpan/ffmpeg", "wangpan/subtitle",
+          "wangpan/danmaku", "wangpan/scrape", "wangpan/pan", "wangpan/transfer")
 
-#: 自己人的源码（不含 tests 里的检查字符串本身）
-要查的目录 = ("wangpan", "tools")
-要查的文件 = ("启动.py",)
+#: 播放路径上"不许调外部命令行"的目录/文件
+播放路径 = ("wangpan/player", "wangpan/ffmpeg")
+播放路径文件 = ("wangpan/ui/播放页.py", "wangpan/ui/播放会话.py")
+
+#: 标准库白名单（内核只许用这些 + PySide6 + 自己）
+标准库 = {
+    "os", "sys", "time", "ctypes", "queue", "threading", "pathlib", "typing",
+    "dataclasses", "unittest", "re", "tempfile", "shutil", "subprocess",
+    "argparse", "importlib", "ast", "json", "struct", "math", "collections",
+    "functools", "itertools", "logging", "signal", "hashlib", "zipfile",
+    "urllib", "socket", "xml", "sqlite3", "concurrent", "base64", "io", "http",
+    "socketserver", "datetime", "enum", "abc", "contextlib", "traceback",
+    "warnings", "random", "unicodedata", "difflib", "statistics", "glob",
+    "shlex", "csv", "ssl", "resource", "binascii", "zlib", "gzip", "tarfile",
+    "secrets", "string", "textwrap", "operator", "copy", "weakref", "gc",
+    "platform", "locale", "asyncio", "inspect", "types", "unittest.mock",
+    "__future__",
+}
+
+允许前缀 = ("PySide6", "shiboken6", "wangpan", "tests")
 
 
-class 独立性测试(unittest.TestCase):
-    def _文件们(self):
-        for 目录 in 要查的目录:
-            基 = 项目根 / 目录
-            if 基.is_dir():
-                yield from (p for p in 基.rglob("*.py") if "__pycache__" not in p.parts)
-        for 名字 in 要查的文件:
+def _源码们(目录们):
+    for 目录 in 目录们:
+        基 = 项目根 / 目录
+        if 基.is_dir():
+            yield from sorted(p for p in 基.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+def _文本(路径: Path) -> str:
+    return 路径.read_text(encoding="utf-8", errors="replace")
+
+
+class 内核独立性测试(unittest.TestCase):
+    """原来的 ①：内核不许引用整合进来的界面层。"""
+
+    def test_内核不引用V1(self):
+        违规: list[str] = []
+        for 路径 in _源码们(内核目录):
+            文本 = _文本(路径)
+            for 词 in ("from v8_3", "import v8_3", "网盘管理/v8_3"):
+                if 词 in 文本:
+                    违规.append(f"{路径.relative_to(项目根)}：出现 {词!r}")
+        self.assertEqual(违规, [], "V2 内核必须能脱离界面层单独跑：\n" + "\n".join(违规))
+
+    def test_纯内核主窗口不引用V1(self):
+        路径 = 项目根 / "wangpan" / "ui" / "主窗口.py"
+        self.assertTrue(路径.is_file())
+        文本 = _文本(路径)
+        for 词 in ("from v8_3", "import v8_3"):
+            self.assertNotIn(词, 文本, f"纯内核壳（--纯播放）不许依赖界面层：出现 {词!r}")
+
+
+class 播放内核测试(unittest.TestCase):
+    """原来的 ②：播放不许靠外部播放器命令行。"""
+
+    def _要查的文件们(self):
+        yield from _源码们(播放路径)
+        for 名字 in 播放路径文件:
             路径 = 项目根 / 名字
             if 路径.is_file():
                 yield 路径
 
-    def test_不引用V1(self):
-        违规: list[str] = []
-        for 路径 in self._文件们():
-            文本 = 路径.read_text(encoding="utf-8", errors="replace")
-            for 词 in 禁用:
-                if 词 in 文本:
-                    违规.append(f"{路径.relative_to(项目根)}：出现 {词!r}")
-        self.assertEqual(违规, [], "V2 必须完全独立，不许引用 V1：\n" + "\n".join(违规))
-
     def test_不调用外部播放器命令行(self):
-        """播放内核不许靠 ffmpeg/ffprobe/vlc 命令 —— 那就不叫"自己用 libav* 写播放器"。"""
         违规: list[str] = []
         模式 = re.compile(r"""subprocess[^\n]*["'](ffmpeg|ffprobe|vlc|cvlc)["']""")
-        for 路径 in self._文件们():
-            if "tools" in 路径.parts:      # 造测试素材允许用系统 ffmpeg
-                continue
-            文本 = 路径.read_text(encoding="utf-8", errors="replace")
+        for 路径 in self._要查的文件们():
+            文本 = _文本(路径)
             for 行号, 行 in enumerate(文本.splitlines(), start=1):
                 if 模式.search(行):
-                    违规.append(f"{路径.relative_to(项目根)}:{行号}")
+                    违规.append(f"{路径.relative_to(项目根)}:{行号}  {行.strip()[:80]}")
         self.assertEqual(违规, [], "播放内核不许调外部播放器命令行：\n" + "\n".join(违规))
 
-    def test_自带解释器是V2自己的(self):
-        """V2 用自己的 venv：venv 的 site-packages 必须在 _V2 里面。
+    def test_没有VLC播放栈(self):
+        """VLC 那一整套（绑定/核心/出口/游离窗口）应当已经删干净。"""
+        残留 = [名字 for 名字 in (
+            "v8_3/播放/vlc绑定.py", "v8_3/播放/播放核心.py", "v8_3/播放/播放出口.py",
+            "v8_3/播放/显示环境.py", "v8_3/播放/游离窗口.py", "v8_3/界面/窗口就绪.py",
+            "v8_3/界面/游离窗口守护.py", "v8_3/界面/播放控件.py")
+            if (项目根 / 名字).is_file()]
+        self.assertEqual(残留, [], "VLC 播放栈必须删掉（播放器已换成 V2 内核）：\n"
+                                 + "\n".join(残留))
 
-        （注意别用 ``解释器.resolve()`` 判断 —— venv 里的 python 是指向系统解释器的
-        符号链接，resolve 之后当然在外面；要看的是 venv 自己的目录。）
-        """
+
+class 环境测试(unittest.TestCase):
+    """原来的 ③：自带解释器 + venv 在项目里。"""
+
+    def test_自带解释器是项目自己的(self):
         venv = 项目根 / "运行环境" / "venv"
-        self.assertTrue((venv / "pyvenv.cfg").is_file(), "V2 应该有自己的一份 venv")
-        # venv 布局两端不同：Linux 是 lib/python3.x/site-packages，Windows 是 Lib/site-packages
+        self.assertTrue((venv / "pyvenv.cfg").is_file(), "应该有自己的一份 venv")
         站点 = list((venv / "lib").glob("python3*/site-packages")) + \
             list((venv / "Lib").glob("site-packages"))
         self.assertTrue(站点, "venv 里没有 site-packages")
-        # 判据是"在项目根下面"，不是"目录名必须是中文" —— CI 上的检出目录叫
-        # wangpan-manager-v2（Windows runner 实测），写死中文名会误报。
-        self.assertEqual(站点[0].resolve(), (venv / 站点[0].relative_to(venv)).resolve())
         self.assertTrue(str(站点[0].resolve()).startswith(str(项目根.resolve())),
                         f"site-packages 不在项目里：{站点[0]}")
-        self.assertTrue((站点[0] / "PySide6").is_dir(), "PySide6 要装在 V2 自己的 venv 里")
+        self.assertTrue((站点[0] / "PySide6").is_dir(), "PySide6 要装在项目自带的 venv 里")
 
-    def test_只有标准库与PySide6(self):
-        """第三方依赖只允许 PySide6（libav* 是系统库，用 ctypes 直连）。"""
-        允许前缀 = ("PySide6", "shiboken6", "tests", "wangpan", "构建", "工具")
-        import ast
+
+class 内核依赖测试(unittest.TestCase):
+    """原来的 ④：内核只许标准库 + PySide6（整合进来的第三方只在 v8_3 层）。"""
+
+    def test_内核只有标准库与PySide6(self):
         违规: list[str] = []
-        for 路径 in self._文件们():
-            树 = ast.parse(路径.read_text(encoding="utf-8", errors="replace"))
+        for 路径 in _源码们(("wangpan",)):
+            树 = ast.parse(_文本(路径))
             for 节点 in ast.walk(树):
-                名字 = None
                 if isinstance(节点, ast.Import):
                     for 别名 in 节点.names:
-                        名字 = 别名.name.split(".")[0]
-                        if 名字 not in 允许前缀 and 名字 not in (
-                                "os", "sys", "time", "ctypes", "queue", "threading",
-                                "pathlib", "typing", "dataclasses", "unittest", "re",
-                                "tempfile", "shutil", "subprocess", "argparse",
-                                "importlib", "ast", "json", "struct", "math",
-                                "collections", "functools", "itertools", "logging",
-                                "signal", "hashlib", "zipfile", "urllib", "socket",
-                                # 刮削/弹幕用到的标准库（之前白名单没列全）
-                                "xml", "sqlite3", "concurrent", "base64", "io",
-                                "http", "socketserver", "datetime", "enum", "abc",
-                                "contextlib", "traceback", "warnings", "random",
-                                "unicodedata", "difflib", "statistics", "glob",
-                                # ssl：SOCKS/HTTP 代理隧道（代理.py）要用它叠 TLS
-                                "shlex", "csv", "ssl"):
-                            违规.append(f"{路径.name}: import {名字}")
+                        根 = 别名.name.split(".")[0]
+                        if 根 not in 允许前缀 and 根 not in 标准库:
+                            违规.append(f"{路径.relative_to(项目根)}: import {根}")
                 elif isinstance(节点, ast.ImportFrom) and 节点.module \
                         and not getattr(节点, "level", 0):
-                    # level>0 = 包内相对导入（from ..player import …），本来就该允许
                     根 = 节点.module.split(".")[0]
-                    if 根 not in 允许前缀 and 根 not in (
-                            "ctypes", "pathlib", "typing", "dataclasses", "queue",
-                            "threading", "collections", "functools", "__future__",
-                            # 标准库（网络/时间/编码/解析…）：不进"第三方"名单
-                            "urllib", "http", "socketserver", "socket", "resource",
-                            "struct", "base64", "hashlib", "json", "io", "os", "sys",
-                            "time", "re", "ast", "unittest", "tempfile", "shutil",
-                            "subprocess", "argparse", "importlib", "logging",
-                            "signal", "zipfile", "math", "random", "datetime",
-                            "enum", "abc", "contextlib", "traceback", "warnings",
-                            # 刮削/弹幕用到的标准库（本来就是标准库，之前只是白名单没列全）
-                            "xml", "sqlite3", "concurrent", "base64", "hashlib",
-                            "urllib", "socket", "socketserver", "http", "io",
-                            "queue", "json", "re", "time", "os", "sys", "ssl"):
-                        违规.append(f"{路径.name}: from {节点.module}")
-        self.assertEqual(sorted(set(违规)), [], "出现了计划外的第三方依赖")
+                    if 根 not in 允许前缀 and 根 not in 标准库:
+                        违规.append(f"{路径.relative_to(项目根)}: from {节点.module}")
+        self.assertEqual(sorted(set(违规)), [],
+                         "V2 内核不许引第三方依赖（第三方只允许出现在 v8_3/ 那一层）")
+
+
+if __name__ == "__main__":
+    unittest.main()

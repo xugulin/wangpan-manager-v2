@@ -202,20 +202,35 @@ class 播放引擎:
         self._读入累计 = 0
         self._码率基点 = (0.0, 0)
         self._输出尺寸 = (0, 0)
+        #: 这一路要不要强制软解（由 :meth:`打开` 的 ``不要硬解`` 设定）
+        self._不要硬解 = False
 
     # ---------------- 打开 / 收尾 ----------------
 
     def 打开(self, 地址: str, 选项: Optional[dict] = None,
-           请求头: Optional[dict] = None) -> None:
+           请求头: Optional[dict] = None, *,
+           不要硬解: bool = False,
+           缓冲字节: int = 0,
+           超时毫秒: int = 0) -> None:
         """打开一路源（本地文件 / 网盘直链）。
 
         :param 请求头: 网盘直链常要的 UA/Referer/Cookie；网络地址会自动补上
             重连/超时/连接复用等选项（见 :func:`wangpan.player.网络.网络选项`）。
+        :param 不要硬解: 这一路强制软解（AI 播放顾问/界面在硬解花屏时用）。
+        :param 缓冲字节: 覆盖默认读缓冲（AI 给出的"网络缓存毫秒"换算而来）；
+            0 = 用 libavformat 默认。
+        :param 超时毫秒: 覆盖默认读写超时；0 = 用 :data:`网络.默认超时毫秒`。
         """
         self.停止()
         选项 = dict(选项 or {})
+        self._不要硬解 = bool(不要硬解)
         if 网络.是网络地址(地址):
-            自动 = 网络.网络选项(地址, 请求头)
+            额外 = {}
+            if int(缓冲字节) > 0:
+                额外["缓冲字节"] = int(缓冲字节)
+            if int(超时毫秒) > 0:
+                额外["超时毫秒"] = int(超时毫秒)
+            自动 = 网络.网络选项(地址, 请求头, **额外)
             自动.update(选项)
             选项 = 自动
             头 = dict(请求头 or {})
@@ -239,6 +254,7 @@ class 播放引擎:
         self.音频 = None
         if self.输入.视频流 is not None:
             self.视频 = 解码.视频解码器(self.输入.绑定, self.输入.视频流)
+            self.视频.允许硬解 = not getattr(self, "_不要硬解", False)
             if self._输出尺寸 != (0, 0):
                 self.视频.设置输出尺寸(*self._输出尺寸)
             self.视频.打开()

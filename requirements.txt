@@ -1,0 +1,33 @@
+# 网盘管理 · 整合版依赖清单
+#
+# 怎么装（项目自带 venv，别用系统 python）：
+#   Linux/macOS:  运行环境/venv/bin/pip install -r requirements.txt
+#   Windows:      运行环境\venv\Scripts\pip install -r requirements.txt
+#
+# 判据来自**源码 AST 扫描**（`v8_3/` + `适配器/` + `wangpan/` 的真实 import），
+# 不是照抄某个旧环境里装过的东西 —— 之前那份环境里有十几个包在源码里**零引用**
+# （oss2 之外还有 aiohttp / cryptography / bytehaul / enhanced_downloader /
+#  py7zr / patool / webdavclient3 / lxml / requests / tqdm / fire / psutil …），
+# 照抄进来只是让发布包白白变大。这里只列真正用到的。
+#
+# ── 必需 ────────────────────────────────────────────────────────────────────
+PySide6>=6.6            # 界面（V1 的 GUI + V2 的播放画面/弹幕/刮削界面）
+httpx>=0.27             # 网盘适配器通信 + AI 请求（唯一被大量使用的第三方）
+#
+# ── 可选（缺了对应功能降级，程序照常跑）────────────────────────────────────
+pyahocorasick>=2.0      # 敏感词 AC 自动机；缺了退化成纯 Python 匹配（慢但能用）
+pypinyin>=0.53          # 敏感词安全词生成；缺了安全词变成 u53d9 这种码点
+qrcode>=7.4             # 登录二维码；缺了只给链接
+pillow>=10.0            # qrcode 出 PNG 要靠它
+#
+# ── 三家网盘适配器（适配器目录里的项目要用）────────────────────────────────
+oss2>=2.18              # 光鸭云盘分片上传
+websocket-client>=1.7   # 百度网盘浏览器会话导入
+#
+# ── 不在这个环境里 ─────────────────────────────────────────────────────────
+# 本地语音识别（faster-whisper / ctranslate2）**故意不装在这里**：它几百 MB，
+# 装一起会拖慢启动、还容易和 PySide6 打架。它有自己的环境：
+#   运行环境/语音识别/venv          ← 由 v8_3/播放/语音识别.py 自己起子进程调用
+# 本地大模型（ollama）是**可执行文件**不是 Python 包：
+#   运行环境/本地模型/bin/ollama
+# libav*（FFmpeg 的运行库）走 ctypes 直连，不是 Python 包 —— 系统装 ffmpeg 即可。

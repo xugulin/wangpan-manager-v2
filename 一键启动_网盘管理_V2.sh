@@ -1,6 +1,6 @@
 #!/bin/sh
 # =============================================================================
-#  网盘管理 V2 一键启动（Linux；双击也能跑）
+#  网盘管理 一键启动（Linux；双击也能跑）
 # =============================================================================
 #  为什么是 POSIX sh 而不是 bash：
 #  某些文件管理器 / 包装器会用别的 shell 解析这个脚本，中文变量名会被当成命令执行
@@ -27,11 +27,11 @@ _pause() {
     return 0
   fi
   if command -v zenity >/dev/null 2>&1; then
-    zenity --info --title='网盘管理 V2' --width=420 \
+    zenity --info --title='网盘管理' --width=420 \
       --text="${1:-启动失败。可以在终端里跑：一键启动_网盘管理_V2.sh --check 看自检结果}" \
       >/dev/null 2>&1 || true
   elif command -v kdialog >/dev/null 2>&1; then
-    kdialog --title '网盘管理 V2' --msgbox \
+    kdialog --title '网盘管理' --msgbox \
       "${1:-启动失败。可以跑 一键启动_网盘管理_V2.sh --check 看自检结果}" \
       >/dev/null 2>&1 || true
   else
@@ -42,21 +42,21 @@ _pause() {
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 PROJ=${V2_HOME:-"$HERE"}
 
-# 认项目本体：必须有 启动.py 与 wangpan/（V2 的特征），避免指错目录
-if [ ! -f "$PROJ/启动.py" ] || [ ! -d "$PROJ/wangpan" ]; then
-  echo "[X] 这里不像是 网盘管理 V2 的项目目录：$PROJ" >&2
-  echo "    应该有 启动.py 与 wangpan/；也可以用 V2_HOME=/路径 $0 指定。" >&2
-  _pause "找不到 网盘管理 V2 的项目目录：$PROJ"
+# 认项目本体：要有 启动.py + wangpan/（自研内核）+ v8_3/（界面层），避免指错目录
+if [ ! -f "$PROJ/启动.py" ] || [ ! -d "$PROJ/wangpan" ] || [ ! -d "$PROJ/v8_3" ]; then
+  echo "[X] 这里不像是 网盘管理 的项目目录：$PROJ" >&2
+  echo "    应该有 启动.py、wangpan/、v8_3/；也可以用 V2_HOME=/路径 $0 指定。" >&2
+  _pause "找不到 网盘管理 的项目目录：$PROJ"
   exit 1
 fi
 PROJ=$(cd -- "$PROJ" && pwd)
 cd -- "$PROJ" || exit 1
 
-# 项目自带的解释器（V2 有自己的 运行环境/venv，不依赖系统 python）
+# 项目自带的解释器（本项目有自己的 运行环境/venv，不依赖系统 python）
 PY="$PROJ/运行环境/venv/bin/python"
 if [ ! -x "$PY" ]; then
   echo "[!] 找不到项目自带解释器：$PY" >&2
-  echo "    V2 自带运行环境（与 V1、系统 python 都不共享）。先建环境：" >&2
+  echo "    本项目自带运行环境（与 V1、系统 python 都不共享）。先建环境：" >&2
   echo "      python3 -m venv 运行环境/venv" >&2
   echo "      运行环境/venv/bin/pip install PySide6" >&2
   _pause "缺少项目自带的 Python 环境（运行环境/venv）。先按 README 建好环境。"
@@ -78,6 +78,20 @@ except Exception as exc:                       # noqa: BLE001
     print("PySide6 ： 缺失（", exc, "）")
     raise SystemExit(1)
 sys.path.insert(0, ".")
+
+# ---- V1 界面/网盘/AI 那一层要用的第三方（缺失时对应功能降级，不是致命）----
+缺 = []
+for 名, 说明 in (("httpx", "网盘适配器与 AI 请求"),
+              ("ahocorasick", "敏感词匹配（缺失会退化成纯 Python）"),
+              ("pypinyin", "安全词生成（缺失会退化成 Unicode 码点）"),
+              ("qrcode", "登录二维码（缺失只给链接）")):
+    try:
+        __import__(名)
+    except Exception:                          # noqa: BLE001
+       缺.append(f"{名}（{说明}）")
+print("界面层  ：", "依赖齐全" if not 缺 else "缺 " + "、".join(缺))
+
+# ---- 自研内核 ----
 try:
     from wangpan.ffmpeg import 加载
     可用 = 加载.可用()
@@ -91,6 +105,26 @@ except SystemExit:
 except Exception as exc:                       # noqa: BLE001
     print("libav*  ： 检查失败（", exc, "）")
     raise SystemExit(1)
+
+# ---- 界面层与适配器 ----
+try:
+    import v8_3.配置 as _配置
+    print("界面层  ： v8_3 可导入（项目根", _配置.项目根, "）")
+except Exception as exc:                       # noqa: BLE001
+    print("界面层  ： v8_3 导入失败（", exc, "）")
+    raise SystemExit(1)
+try:
+    实例们 = _配置.网盘实例列表(_配置.加载配置())
+    启用 = [x for x in 实例们 if x["启用"]]
+    print("网盘    ：", f"{len(启用)} 个启用 / {len(实例们)} 个已配置")
+    for 项 in 启用:
+        规格 = _配置.适配器规格表(_配置.加载配置()).get(项["标识"])
+        if 规格 is None:
+            continue
+        好, 说明 = type(规格).校验目录(规格.路径)
+        print(f"  - {项['标识']}：{'目录 OK' if 好 else 说明}")
+except Exception as exc:                       # noqa: BLE001
+    print("网盘    ： 检查失败（", exc, "）")
 PYCODE
     RC=$?
     if [ "$RC" -eq 0 ]; then
@@ -111,12 +145,12 @@ esac
 # ---- 正常启动 ----
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   echo "[X] 没有图形会话（DISPLAY / WAYLAND_DISPLAY 都是空的）。" >&2
-  echo "    V2 是桌面程序，请在图形界面里运行。" >&2
-  _pause "没有图形会话：V2 是桌面程序，请在图形界面里运行。"
+  echo "    这是桌面程序，请在图形界面里运行。" >&2
+  _pause "没有图形会话：这是桌面程序，请在图形界面里运行。"
   exit 2
 fi
 
-echo "▶ 启动 网盘管理 V2（$PROJ）"
+echo "▶ 启动 网盘管理（$PROJ）"
 "$PY" "$PROJ/启动.py" "$@"
 RC=$?
 if [ "$RC" -ne 0 ]; then

@@ -214,7 +214,9 @@ class 安装脚本测试(unittest.TestCase):
         self.assertTrue(条目.is_file(), "没装菜单项")
         self.assertTrue(桌面项.is_file(), "没装桌面图标")
         文本 = 条目.read_text(encoding="utf-8")
-        必需 = {"Type=Application": "Type", "Name=网盘管理 V2": "Name",
+        # ⚠️ 整合后显示名是「网盘管理」（.desktop 的文件名仍是 网盘管理_V2.desktop，
+        #    StartupWMClass 也仍是 网盘管理V2 —— 与 启动.py 的 setApplicationName 一致）。
+        必需 = {"Type=Application": "Type", "Name=网盘管理": "Name",
               "Terminal=false": "Terminal", "StartupWMClass=网盘管理V2": "StartupWMClass"}
         for 片段, 名字 in 必需.items():
             self.assertIn(片段, 文本, f"缺 {名字}")
