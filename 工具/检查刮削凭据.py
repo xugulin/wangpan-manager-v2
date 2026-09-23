@@ -6,13 +6,15 @@
 
 它会依次检查：
 1. **凭据**：TMDB（Bearer 或 v3 Key）、弹弹play（AppId + AppSecret）读到了没有（**只报有没有，不打印值**）；
-2. **TMDB API**：能不能连上（连不上会提示"可能是网络/代理问题"，并说明本客户端支持
-   ``https_proxy`` 环境变量）；
-3. **TMDB 图片 CDN**：能不能下图（这个和 API 是两个域名，经常一个通一个不通）；
-4. **弹弹play**：带签名请求一次公开接口，看是不是 403（说明需要 AppId）。
+2. **代理**：配了 ``V2_TMDB_PROXY`` / ``数据/刮削.json`` 的 ``proxy`` 没有、连不连得上
+   （本机 v2rayN 的 SOCKS5 口是 10808；**直连不通但代理通**就是这种情况）；
+3. **TMDB API**：直连与经代理各试一次（"直连不通、代理通"要如实报出来）；
+4. **TMDB 图片 CDN**：能不能下图（这个和 API 是两个域名，经常一个通一个不通）；
+5. **弹弹play**：带签名请求一次公开接口，看是不是 403（说明需要 AppId）。
 
 这条自检很重要：实测遇到过"图片 CDN 通、API 不通"（DNS 被劫持到无关 IP），
-只看报错会觉得是 Key 写错了。
+只看报错会觉得是 Key 写错了；后来这台机器**直连两个域名都不通、走本机 SOCKS5 代理才通**，
+所以现在两个路径都测、都报。
 """
 
 from __future__ import annotations
@@ -78,19 +80,54 @@ def main() -> int:
     ip们 = 查DNS("api.themoviedb.org")
     记(f"api.themoviedb.org 解析到：{ip们 or '（解析失败）'}")
     码, 详情 = 查HTTP("https://api.themoviedb.org/3/configuration?api_key=probe")
-    通 = 码 in (200, 401, 404)          # 401/404 也算通（说明连上了，只是参数不对）
-    记(f"TMDB API 连通性：HTTP {码 or '连接失败'}"
-      + (f"（{详情}）" if 详情 else ""), 通)
-    if not 通:
-        记("  怎么办：这台机器连不上 TMDB 的 **API 域名**（常见原因：网络环境需要代理，"
-          "或 DNS 被劫持到无关 IP）。本客户端支持标准代理环境变量，例如：\n"
-          "      export https_proxy=http://127.0.0.1:7890\n"
-          "    （也可写进启动脚本；图片 CDN 与 API 是两个域名，可能一个通一个不通）")
+    直连通 = 码 in (200, 401, 404)      # 401/404 也算通（说明连上了，只是参数不对）
+    记(f"TMDB API 直连：HTTP {码 or '连接失败'}"
+      + (f"（{详情}）" if 详情 else ""), 直连通)
 
-    # ---- 3) 图片 CDN ----
+    # ---- 3) 代理（真机实测：直连两个域名都不通，走本机 SOCKS5 就通）----
+    经代理通 = False
+    代理对象 = None
+    try:
+        from wangpan.scrape.代理 import 代理错误, 解析代理, 经代理取
+        代理文本 = (配置.代理 if "配置" in dir() else "") or ""
+        代理对象 = 解析代理(代理文本) if 代理文本 else None
+        if 代理对象 is None:
+            记(f"TMDB 代理：没配（V2_TMDB_PROXY / 数据/刮削.json 的 proxy；"
+              f"本机 v2rayN 的 SOCKS5 口通常是 socks5://127.0.0.1:10808）")
+        else:
+            记(f"TMDB 代理：{代理对象.可读()}")
+            try:
+                应答 = 经代理取("https://api.themoviedb.org/3/configuration?api_key=probe",
+                            超时=12.0, 代理=代理对象)
+                经代理通 = 应答.状态码 in (200, 401, 404)
+                记(f"TMDB API 经代理：HTTP {应答.状态码}", 经代理通)
+            except 代理错误 as 错:
+                记(f"TMDB API 经代理失败：{错}", False)
+                if not 直连通:
+                    记("  怎么办：代理也不通时，检查代理程序是否在跑、端口对不对"
+                      "（v2rayN 默认 SOCKS 口 10808）")
+    except Exception as 错:  # noqa: BLE001
+        记(f"代理检查异常：{错}", False)
+    if not 直连通 and not 经代理通:
+        记("  怎么办：这台机器连不上 TMDB 的 **API 域名**（常见原因：需要代理，"
+          "或 DNS 被劫持到无关 IP）。两种配法：\n"
+          "      V2_TMDB_PROXY=socks5://127.0.0.1:10808   ← 本客户端自己实现的 SOCKS5（推荐）\n"
+          "      export https_proxy=http://127.0.0.1:7890  ← 标准环境变量（HTTP 代理）\n"
+          "    （图片 CDN 与 API 是两个域名，可能一个通一个不通）")
+
+    # ---- 4) 图片 CDN（直连 + 代理各试一次）----
     码图, _ = 查HTTP("https://image.tmdb.org/t/p/w92/1E5baAaEse26fej7uHcjOgEE2t2.jpg")
-    记(f"TMDB 图片 CDN：HTTP {码图 or '连接失败'}", 码图 == 200)
-    if 码图 != 200:
+    记(f"TMDB 图片 CDN 直连：HTTP {码图 or '连接失败'}", 码图 == 200)
+    if 码图 != 200 and 代理对象 is not None:
+        try:
+            from wangpan.scrape.代理 import 经代理取
+            应答 = 经代理取("https://image.tmdb.org/t/p/w92/1E5baAaEse26fej7uHcjOgEE2t2.jpg",
+                        超时=12.0, 代理=代理对象)
+            记(f"TMDB 图片 CDN 经代理：HTTP {应答.状态码}（{len(应答.体)} 字节）",
+              应答.状态码 == 200)
+        except Exception as 错:  # noqa: BLE001
+            记(f"TMDB 图片 CDN 经代理失败：{str(错)[:120]}", False)
+    elif 码图 != 200:
         记("  怎么办：图片 CDN 不通时海报墙只有占位色块，但资料仍能入库")
 
     # ---- 4) 弹弹play ----

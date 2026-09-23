@@ -70,3 +70,57 @@ class 关窗测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 退出收尾测试(unittest.TestCase):
+    """**任何**退出路径都要先停线程：`QApplication.quit()` 不走 closeEvent。
+
+    真机踩到过两次：一次是用户关窗（修在 closeEvent 里），一次是**验证脚本跑完
+    直接 quit**（库还原的瞬间核心转储，终端只留一句
+    "QThread: Destroyed while thread is still running"）。
+    所以收尾逻辑抽成 `主窗口.退出前收尾()`，并且挂到 `aboutToQuit` 上。
+    """
+
+    def setUp(self):
+        self.临时 = 临时目录()
+        self.addCleanup(self.临时.cleanup)
+        库路径 = Path(self.临时.name) / "库.db"
+        真的 = 资料库
+
+        class 临时库(真的):                       # type: ignore[misc, valid-type]
+            def __init__(自己, 路径=None):
+                super().__init__(库路径)
+
+        import wangpan.scrape.库 as 库模块
+        库模块.资料库 = 临时库
+        self.addCleanup(lambda: setattr(库模块, "资料库", 真的))
+        from wangpan.ui.主窗口 import 主窗口
+        self.窗口 = 主窗口()
+        for _ in range(4):
+            应用.processEvents()
+
+    def _假刮削线程(self, 秒: float):
+        from PySide6.QtCore import QThread
+
+        class 慢活(QThread):
+            def run(自己):
+                import time as _time
+                _time.sleep(秒)
+
+        return 慢活()
+
+    def test_quit会等刮削线程跑完(self):
+        from PySide6.QtCore import QTimer
+        线程 = self._假刮削线程(0.4)
+        self.窗口._刮削线程 = 线程
+        线程.start()
+        self.assertTrue(线程.isRunning())
+        QTimer.singleShot(30, 应用.quit)
+        应用.exec()                                # quit → aboutToQuit → 退出前收尾
+        self.assertFalse(线程.isRunning(), "退出时还在跑的线程必须被等停（否则进程会 abort）")
+
+    def test_收尾是幂等的(self):
+        self.窗口.退出前收尾()
+        self.assertTrue(self.窗口._收尾过)
+        self.窗口.退出前收尾()                     # 再来一次不该炸
+        self.窗口.close()                          # closeEvent 也会调它

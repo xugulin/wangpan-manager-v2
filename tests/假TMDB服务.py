@@ -20,13 +20,15 @@
 from __future__ import annotations
 
 import json
+import socket
+import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-__all__ = ["假TMDB服务", "默认候选"]
+__all__ = ["假TMDB服务", "默认候选", "假代理服务"]
 
 
 #: 默认造出来的候选（**故意含糊**：三部同名片、热度咬得很紧 → 自动匹配不敢定）
@@ -284,3 +286,153 @@ class 假TMDB服务:
             for 尺寸 in ("w185", "w342", "w1280", "w300", "h632"):
                 (self.图片目录 / 尺寸).mkdir(parents=True, exist_ok=True)
                 (self.图片目录 / 尺寸 / 名).write_bytes(路径.read_bytes())
+
+
+# ============================ 假代理（SOCKS5 / HTTP CONNECT）============================
+
+
+class _代理处理(threading.Thread):
+    """一条连接：握手 → 拿到目标地址 → 转发（双向管道）。"""
+
+    def __init__(self, 连接, 模式: str, 记录: list) -> None:
+        super().__init__(daemon=True)
+        self.连接 = 连接
+        self.模式 = 模式
+        self.记录 = 记录
+
+    def run(self) -> None:                      # noqa: D102 - Thread
+        try:
+            if self.模式 == "socks5":
+                目标 = self._socks5()
+            else:
+                目标 = self._http_connect()
+            if 目标 is None:
+                return
+            主机, 端口 = 目标
+            self.记录.append((主机, 端口))
+            with socket.create_connection((主机, 端口), timeout=5.0) as 上游:
+                threading.Thread(target=self._泵, args=(self.连接, 上游),
+                                 daemon=True).start()
+                self._泵(上游, self.连接)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.连接.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _泵(源, 目标) -> None:
+        try:
+            while True:
+                块 = 源.recv(65536)
+                if not 块:
+                    break
+                目标.sendall(块)
+        except OSError:
+            pass
+        finally:
+            try:
+                目标.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    def _读(self, 数: int) -> bytes:
+        数据 = b""
+        while len(数据) < 数:
+            块 = self.连接.recv(数 - len(数据))
+            if not 块:
+                raise OSError("客户端断开")
+            数据 += 块
+        return 数据
+
+    def _socks5(self):
+        版本, 方法数 = self._读(2)
+        if 版本 != 0x05:
+            return None
+        方法们 = self._读(方法数)
+        if 0x00 not in 方法们:
+            self.连接.sendall(bytes([0x05, 0xFF]))
+            return None
+        self.连接.sendall(bytes([0x05, 0x00]))          # 免认证
+        版本, 命令, _, 类型 = self._读(4)
+        if 类型 == 0x01:
+            主机 = socket.inet_ntoa(self._读(4))
+        elif 类型 == 0x03:
+            长度 = self._读(1)[0]
+            主机 = self._读(长度).decode("ascii", "replace")
+        elif 类型 == 0x04:
+            主机 = socket.inet_ntop(socket.AF_INET6, self._读(16))
+        else:
+            return None
+        端口 = struct.unpack("!H", self._读(2))[0]
+        if 命令 != 0x01:                                # 只支持 CONNECT
+            self.连接.sendall(bytes([0x05, 0x07, 0x00, 0x01]) + b"\0" * 6)
+            return None
+        self.连接.sendall(bytes([0x05, 0x00, 0x00, 0x01]) + b"\0" * 6)
+        return (主机, 端口)
+
+    def _http_connect(self):
+        数据 = b""
+        while b"\r\n\r\n" not in 数据:
+            块 = self.连接.recv(4096)
+            if not 块:
+                return None
+            数据 += 块
+        首行 = 数据.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        段 = 首行.split()
+        if len(段) < 2 or 段[0].upper() != "CONNECT" or ":" not in 段[1]:
+            self.连接.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+            return None
+        主机, _, 端口 = 段[1].rpartition(":")
+        self.连接.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        return (主机, int(端口 or 443))
+
+
+class 假代理服务:
+    """环回口上的假代理（测 :mod:`wangpan.scrape.代理` 用）。
+
+    ``模式`` 取 ``"socks5"`` 或 ``"http"``：**真握手、真 CONNECT、真转发**，
+    只是不加密也不过境外 —— 这样"代理客户端代码"能在单测里被真跑一遍。
+    """
+
+    def __init__(self, 模式: str = "socks5") -> None:
+        self.模式 = 模式
+        self.记录: list[tuple[str, int]] = []
+        self._套接字: Optional[socket.socket] = None
+        self.端口 = 0
+        self._线程: Optional[threading.Thread] = None
+
+    def 启动(self) -> str:
+        self._套接字 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._套接字.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._套接字.bind(("127.0.0.1", 0))
+        self._套接字.listen(16)
+        self.端口 = int(self._套接字.getsockname()[1])
+        self._线程 = threading.Thread(target=self._循环, daemon=True)
+        self._线程.start()
+        return f"{self.模式}://127.0.0.1:{self.端口}"
+
+    def _循环(self) -> None:
+        while self._套接字 is not None:
+            try:
+                连接, _ = self._套接字.accept()
+            except OSError:
+                return
+            _代理处理(连接, self.模式, self.记录).start()
+
+    def 停止(self) -> None:
+        if self._套接字 is not None:
+            try:
+                self._套接字.close()
+            except OSError:
+                pass
+        self._套接字 = None
+
+    def __enter__(self) -> "假代理服务":
+        self.启动()
+        return self
+
+    def __exit__(self, *_异常) -> None:
+        self.停止()

@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 
 from tests.公用 import 临时目录
-from tests.假TMDB服务 import 默认候选, 假TMDB服务
+from tests.假TMDB服务 import 默认候选, 假代理服务, 假TMDB服务
 
 from PySide6.QtWidgets import QApplication
 
@@ -174,8 +174,11 @@ class 端到端队列测试(unittest.TestCase):
         cls.服务.造图()
         cls.服务.启动()
         cls.媒体 = cls.根 / "媒体"
-        (cls.媒体 / "沙丘 (2021)").mkdir(parents=True, exist_ok=True)
-        (cls.媒体 / "沙丘 (2021)" / "沙丘 (2021) 1080p.mkv").write_bytes(
+        (cls.媒体 / "未知片名 (2021)").mkdir(parents=True, exist_ok=True)
+        # 这个名字**故意谁都对不上**（"未知片名"）：最佳候选只有 40 多分 → 进待确认队列。
+        # 注意别用"沙丘 (2021)"：那种"片名+年份都对得上"的会直接采纳
+        #（见 匹配打分.自动决策 的"精确一致"例外，那是真机测真 API 之后加的规则）。
+        (cls.媒体 / "未知片名 (2021)" / "未知片名 (2021) 1080p.mkv").write_bytes(
             b"x" * (2 * 1024 * 1024))
 
     @classmethod
@@ -195,6 +198,21 @@ class 端到端队列测试(unittest.TestCase):
         self.addCleanup(服务.关闭)
         return 库, 缓存, 客户端, 服务
 
+    def test_片名年份都对得上就直接采纳(self):
+        """真机规则：候选里有"片名一模一样 + 年份对得上"的那一部 → 不用问人。"""
+        媒体 = self.根 / "直接采纳"
+        (媒体 / "沙丘 (2021)").mkdir(parents=True, exist_ok=True)
+        (媒体 / "沙丘 (2021)" / "沙丘 (2021) 2160p.mkv").write_bytes(
+            b"y" * (2 * 1024 * 1024))
+        库, 缓存, 客户端, 服务 = self._造()
+        服务.扫库([媒体])
+        结果 = 服务.续跑()
+        self.assertEqual(结果.成功, 1, f"该直接采纳：{结果.摘要()}")
+        self.assertEqual(结果.需要确认, 0)
+        self.assertEqual(库.待确认数(), 0)
+        行 = 库.列表()[0]
+        self.assertEqual(库.取媒体(int(行["id"])).外部ID["tmdb"], "101")
+
     def test_含糊条目进队列再采纳(self):
         库, 缓存, 客户端, 服务 = self._造()
         服务.扫库([self.媒体])
@@ -212,7 +230,8 @@ class 端到端队列测试(unittest.TestCase):
         self.assertEqual(len(行们), 1)
         条目 = 库.取媒体(int(行们[0]["id"]))
         self.assertEqual(条目.外部ID["tmdb"], "202")
-        self.assertEqual(条目.标题, "沙丘", "本地文件名解析出的标题优先（不该被在线覆盖）")
+        self.assertEqual(条目.标题, "未知片名",
+                         "本地文件名解析出的标题优先（不该被在线覆盖）")
         self.assertEqual(条目.原名, 默认候选[1]["original_title"],
                          "取回来的必须是选中那一部的详情（202）")
         self.assertEqual(条目.时长分钟, 155)
@@ -227,3 +246,78 @@ class 端到端队列测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 代理测试(unittest.TestCase):
+    """代理链路（SOCKS5 握手 + CONNECT 隧道）——用环回假代理真跑一遍。
+
+    真机背景：这台机器直连到不了 api.themoviedb.org（DNS 被解析到无关地址），
+    而本机 v2rayN 的 SOCKS5 口是通的。所以"能不能走代理"直接决定这个模块在
+    真实网络下可用不可用；而单测里**不能依赖**用户机器上真有个代理，
+    于是 `tests/假TMDB服务.假代理服务` 顶替它（真握手、真转发）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.临时 = 临时目录()
+        cls.根 = Path(cls.临时.name)
+        cls.服务 = 假TMDB服务(cls.根 / "图床")
+        cls.服务.造图()
+        cls.服务.启动()
+        cls.SOCKS = 假代理服务("socks5")
+        cls.SOCKS.启动()
+        cls.HTTP代理 = 假代理服务("http")
+        cls.HTTP代理.启动()
+
+    @classmethod
+    def tearDownClass(cls):
+        for 服务 in (cls.SOCKS, cls.HTTP代理, cls.服务):
+            服务.停止()
+        cls.临时.cleanup()
+
+    def _客户端(self, 代理: str):
+        配置 = TMDB配置(token="PROXY-token-1", 缓存目录=self.根 / f"代理缓存_{代理[:6]}",
+                     接口基地址=self.服务.接口基地址, 超时秒=5.0, 代理=代理)
+        return TMDB客户端(配置)
+
+    def test_socks5代理能取到数据(self):
+        客户端 = self._客户端(f"socks5://127.0.0.1:{self.SOCKS.端口}")
+        候选们 = 客户端.搜电影("沙丘", 2021)
+        self.assertEqual(候选们[0].来源标识, "101")
+        self.assertTrue(self.SOCKS.记录, "假 SOCKS5 应该收到一次 CONNECT")
+        主机, 端口 = self.SOCKS.记录[-1]
+        self.assertEqual((主机, 端口), ("127.0.0.1", self.服务.端口))
+
+    def test_http代理的CONNECT隧道也能用(self):
+        客户端 = self._客户端(f"http://127.0.0.1:{self.HTTP代理.端口}")
+        条目 = 客户端.取电影("202")
+        self.assertEqual(条目.外部ID.get("tmdb"), "202")
+        self.assertTrue(self.HTTP代理.记录)
+
+    def test_代理挂了给的是人话(self):
+        客户端 = self._客户端("socks5://127.0.0.1:9")      # 没人听的端口
+        with self.assertRaises(请求失败) as 上下文:
+            客户端.搜电影("沙丘")
+        文本 = str(上下文.exception)
+        self.assertIn("代理", 文本)
+        self.assertNotIn("PROXY-token-1", 文本)
+
+    def test_代理配置解析(self):
+        from wangpan.scrape.代理 import 代理错误, 解析代理
+        self.assertIsNone(解析代理(""))
+        self.assertEqual(解析代理("socks5://127.0.0.1:10808").可读(),
+                        "socks5://127.0.0.1:10808")
+        self.assertEqual(解析代理("127.0.0.1:1080").类型, "socks5")   # 只给 host:port
+        self.assertTrue(解析代理("socks5h://a:1").代理解析域名)
+        带认证 = 解析代理("socks5://user:p%40ss@127.0.0.1:1080")
+        self.assertEqual((带认证.用户名, 带认证.密码), ("user", "p@ss"))
+        self.assertNotIn("p@ss", 带认证.可读(), "可读形式不能回显密码")
+        with self.assertRaises(代理错误):
+            解析代理("ftp://127.0.0.1:21")
+
+    def test_配置摘要会报代理但不含密码(self):
+        客户端 = self._客户端("socks5://user:secret@127.0.0.1:1080")
+        摘要 = str(客户端.配置摘要())
+        self.assertIn("socks5://127.0.0.1:1080", 摘要)
+        self.assertIn("带认证：user", 摘要)
+        self.assertNotIn("secret", 摘要)

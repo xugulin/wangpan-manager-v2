@@ -67,7 +67,8 @@ class 图片缓存:
                  容量上限字节: int = 2 * 1024 * 1024 * 1024,
                  保护期秒: float = 120.0,
                  超时秒: float = 30.0,
-                 请求头: Optional[dict] = None) -> None:
+                 请求头: Optional[dict] = None,
+                 代理: str = "") -> None:
         self.根 = Path(根目录) if 根目录 else \
             Path(__file__).resolve().parents[2] / "数据" / "缓存" / "图片"
         self.根.mkdir(parents=True, exist_ok=True)
@@ -75,10 +76,49 @@ class 图片缓存:
         self.保护期秒 = max(0.0, float(保护期秒))
         self.超时秒 = float(超时秒)
         self.请求头 = dict(请求头 or {"User-Agent": "wangpan-v2/2.0"})
+        #: 代理（空 = 直连）。图片 CDN 和 API 是两个域名，可能只有一个需要代理，
+        #: 所以这里单独可配（由 :class:`~wangpan.scrape.服务.刮削服务` 从客户端同步过来）。
+        self.代理文本 = str(代理 or "")
         self.统计 = 缓存统计()
         #: 内存里的小图缓存（海报墙滚动时避免反复读盘 + 反复解码）
         self._内存: dict[str, QImage] = {}
         self._内存上限 = 400
+
+    def 设置代理(self, 文本: str) -> None:
+        self.代理文本 = str(文本 or "")
+
+    @property
+    def 代理(self):
+        """解析好的代理对象（没配/配坏了都是 None）。"""
+        if not self.代理文本:
+            return None
+        try:
+            from .代理 import 解析代理
+            return 解析代理(self.代理文本)
+        except Exception:  # noqa: BLE001 - 代理配坏了不该让下图整条崩掉
+            return None
+
+    def _取字节(self, 地址: str) -> bytes:
+        """下载一个地址的图片字节（走代理或直连）。
+
+        任何失败都转成 ``OSError``：调用方 :meth:`确保` 的契约是"失败返回 None，
+        不抛异常"（一张图不该毁掉一次刮削），所以这里要把代理层自己的异常也收进来。
+        """
+        if self.代理文本:
+            代理 = self.代理
+            if 代理 is None:
+                raise OSError(f"代理配置有问题（{self.代理文本}），这张图不下了")
+            from .代理 import 代理错误, 经代理取
+            try:
+                应答 = 经代理取(地址, self.超时秒, 代理, self.请求头)
+            except 代理错误 as 错:
+                raise OSError(f"图片走代理失败：{错}") from None
+            if 应答.状态码 >= 400:
+                raise OSError(f"图片 HTTP {应答.状态码}")
+            return 应答.体
+        请求 = urllib.request.Request(地址, headers=self.请求头)
+        with urllib.request.urlopen(请求, timeout=self.超时秒) as 应答:
+            return 应答.read()
 
     # ---------------- 路径 ----------------
 
@@ -116,9 +156,7 @@ class 图片缓存:
               else f"{基地址.rstrip('/')}/{尺寸}{远端路径}")
         临时 = 本地.with_suffix(本地.suffix + ".部分")
         try:
-            请求 = urllib.request.Request(地址, headers=self.请求头)
-            with urllib.request.urlopen(请求, timeout=self.超时秒) as 应答:
-                数据 = 应答.read()
+            数据 = self._取字节(地址)
             if not 数据:
                 raise OSError("空响应")
             临时.write_bytes(数据)

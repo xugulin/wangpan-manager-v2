@@ -207,6 +207,10 @@ class 主窗口(QMainWindow):
         self._存档定时器.setInterval(5000)
         self._存档定时器.timeout.connect(self._存档位置)
         self._存档定时器.start()
+        # 任何退出路径（关窗 / quit / 会话注销）都要先停线程再关库，否则进程会 abort
+        应用 = QApplication.instance()
+        if 应用 is not None:
+            应用.aboutToQuit.connect(self.退出前收尾)
 
     # ---------------- 对外 ----------------
 
@@ -925,21 +929,30 @@ class 主窗口(QMainWindow):
             return
         super().keyPressEvent(事件)
 
-    def closeEvent(self, 事件):  # noqa: N802 - Qt 命名
-        self._存档位置()                     # 关窗再存一次（别丢最后几秒）
-        self.存弹幕设置()                     # 弹幕观感/过滤规则也存一下
+    def 退出前收尾(self) -> None:
+        """把还在跑的线程停掉、把该存的存掉（**任何退出路径**都要走一遍）。
+
+        为什么要单独有它：`closeEvent` 只在"用户关窗"时跑；而**直接
+        `QApplication.quit()`**（脚本、会话注销、Ctrl+Q）不会走关窗 —— 于是
+        `_刮削线程` / 海报墙的图片线程还在跑就被析构 → 进程 abort
+        （真机真发生过：验证脚本跑完 restore 数据库时核心转储，
+        终端只留一句 "QThread: Destroyed while thread is still running"）。
+        """
+        if getattr(self, "_收尾过", False):
+            return
+        self._收尾过 = True
+        self._存档位置()
+        self.存弹幕设置()
         try:
             self.引擎.停止()
         except Exception:  # noqa: BLE001
             pass
         try:
-            self.网盘页.关闭()
+            if getattr(self, "网盘页", None) is not None:
+                self.网盘页.关闭()
         except Exception:  # noqa: BLE001
             pass
         try:
-            # ⚠️ 顺序要紧：**先停海报墙的工作线程，再关库**。
-            #    QThread 还在跑就被析构 = 进程直接 abort（真机退出时崩过：
-            #    "QThread: Destroyed while thread is still running"）。
             if getattr(self, "海报墙", None) is not None:
                 self.海报墙.关闭()
         except Exception:  # noqa: BLE001
@@ -947,12 +960,23 @@ class 主窗口(QMainWindow):
         try:
             线 = getattr(self, "_刮削线程", None)
             if 线 is not None and 线.isRunning():
-                线.wait(3000)
+                线.wait(15000)          # 刮削可能正在下图，给它跑完（不然库是半截的）
         except Exception:  # noqa: BLE001
             pass
         try:
-            if self.资料库 is not None:
+            if getattr(self, "资料库", None) is not None:
                 self.资料库.关闭()
         except Exception:  # noqa: BLE001
             pass
+        # 连子窗口一起关：详情页自己也有一个读图/下图线程（详情页.关闭() 会停它），
+        # 只停海报墙本体的线程是不够的（真机实测：退出时崩在详情页那个线程上）。
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def closeEvent(self, 事件):  # noqa: N802 - Qt 命名
+        self.退出前收尾()
         super().closeEvent(事件)
+        return
+

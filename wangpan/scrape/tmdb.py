@@ -38,6 +38,7 @@ from typing import Callable, Optional
 
 from .模型 import (人物, 人物工种, 参演, 图片, 图片类型, 媒体条目, 媒体类型, 季, 集,
                 分级, 匹配候选)
+from .代理 import 代理错误, 解析代理, 经代理取
 
 __all__ = ["署名", "TMDB配置", "TMDB客户端", "请求失败", "默认配置路径", "默认缓存目录",
            "最长缓存秒", "接口基地址", "默认图片基地址", "国家回退顺序"]
@@ -105,6 +106,9 @@ class TMDB配置:
     #: 只在"真机验证 / 自建代理"时填：指向 tests/假TMDB服务.py 的环回地址，
     #: 这样整条链路（urllib、鉴权头、JSON、图片基地址）都能离线真跑一遍。
     接口基地址: str = ""
+    #: 代理（空 = 直连）。真机实测：这台机器直连到不了 api.themoviedb.org
+    #: （DNS 被解析到无关地址），但本机 v2rayN 的 SOCKS5 口是通的 —— 见 代理.py。
+    代理: str = ""
 
     @classmethod
     def 从环境与配置(cls, 配置路径: Optional[Path] = None) -> "TMDB配置":
@@ -141,6 +145,12 @@ class TMDB配置:
             配置.api_key = 值
         if (值 := str(os.environ.get("V2_TMDB_API_BASE") or "").strip()):
             配置.接口基地址 = 值         # 指向自建代理 / 环回假服务（真机验证用）
+        for 键 in ("proxy", "代理", "httpsProxy", "socksProxy"):
+            if 节点.get(键):
+                配置.代理 = str(节点[键]).strip()
+                break
+        if (值 := str(os.environ.get("V2_TMDB_PROXY") or "").strip()):
+            配置.代理 = 值               # 环境变量优先（机器上的比仓库里的权威）
         return 配置
 
     def 密钥问题(self) -> str:
@@ -251,11 +261,17 @@ class TMDB客户端:
 
     def 配置摘要(self) -> dict:
         """给界面/日志用的一句话配置说明（**密钥只报"有没有"**）。"""
+        代理 = ""
+        try:
+            已解析 = self.代理配置()
+            代理 = 已解析.可读() if 已解析 is not None else ""
+        except 请求失败 as 错:
+            代理 = f"（配置有问题：{错}）"
         return {"可用": self.可用(), "鉴权": self.配置.鉴权方式(),
                 "语言": self.配置.language, "图片语言": self.图片语言参数(),
                 "缓存目录": str(self.配置.缓存目录 or 默认缓存目录()),
                 "缓存TTL天": round(self.配置.缓存TTL秒 / 86400.0, 3),
-                "超时秒": self.配置.超时秒}
+                "超时秒": self.配置.超时秒, "代理": 代理 or "直连"}
 
     def 配置信息(self) -> dict:
         """``/configuration``：图片基地址与尺寸表（给界面拼图用）。"""
@@ -609,8 +625,9 @@ class TMDB客户端:
     def _连不上提示() -> str:
         """连不上 API 时的统一提示（图片 CDN 与 API 是两个域名，这点最容易误判）。"""
         return ("    这不是 Key 的问题，而是网络到不了 api.themoviedb.org。\n"
-                "    ① 若你有代理：设环境变量 https_proxy（例如 "
-                "export https_proxy=http://127.0.0.1:7890）后重试；\n"
+                "    ① 若你有代理：设 V2_TMDB_PROXY（例如 "
+                "socks5://127.0.0.1:10808 —— v2rayN 的默认 SOCKS 口），"
+                "或设 https_proxy（http://127.0.0.1:7890）后重试；\n"
                 "    ② 图片 CDN（image.tmdb.org）与 API 是两个域名，可能只有 API 不通 —— "
                 "此时仍可用本地 NFO/图片刮削；\n"
                 "    ③ 自检：运行 工具/检查刮削凭据.py 会分别报两个域名的连通性。")
@@ -624,12 +641,40 @@ class TMDB客户端:
         结果 = re.sub(r"(api_key=)[^&\s\"']+", r"\1***", 结果, flags=re.I)
         return 结果
 
-    # ---------------- 默认传输（urllib） ----------------
+    # ---------------- 默认传输（urllib / 代理） ----------------
+
+    def 代理配置(self):
+        """解析好的代理对象（没配就是 None）。**坏代理**会在这里抛 请求失败。"""
+        原文 = str(getattr(self.配置, "代理", "") or "").strip()
+        if not 原文:
+            return None
+        try:
+            return 解析代理(原文)
+        except 代理错误 as 错:
+            raise 请求失败(0, f"TMDB 代理配置有问题：{错}") from None
 
     def _默认请求(self, 方法: str, 地址: str, 参数: dict, 头: dict) -> dict:
-        """标准库实现的默认传输：``请求(方法, 地址, 参数, 头) -> dict``。"""
+        """标准库实现的默认传输：``请求(方法, 地址, 参数, 头) -> dict``。
+
+        配了代理就走 :mod:`~wangpan.scrape.代理`（标准库自己实现的 SOCKS5/HTTP 隧道）——
+        真机实测直连到不了 api.themoviedb.org，而本机 SOCKS5 口是通的。
+        """
         查询 = urllib.parse.urlencode({k: v for k, v in (参数 or {}).items() if v is not None})
         完整 = f"{地址}?{查询}" if 查询 else 地址
+        代理 = self.代理配置()
+        if 代理 is not None:
+            try:
+                应答 = 经代理取(完整, float(self.配置.超时秒), 代理, 头)
+            except 代理错误 as 错:
+                raise 请求失败(0, f"TMDB 请求走代理失败：{self._脱敏(str(错))}") from None
+            if 应答.状态码 >= 400:
+                重试后 = 应答.头.get("retry-after", "")
+                raise 请求失败(int(应答.状态码),
+                           f"TMDB HTTP {应答.状态码}：{地址}", 重试后)
+            try:
+                return json.loads(应答.文本())
+            except ValueError:
+                raise 请求失败(0, f"TMDB 响应不是 JSON：{地址}") from None
         请求对象 = urllib.request.Request(完整, headers=dict(头 or {}), method=方法 or "GET")
         try:
             with urllib.request.urlopen(请求对象, timeout=float(self.配置.超时秒)) as 响应:
@@ -651,6 +696,16 @@ class TMDB客户端:
             raise 请求失败(0, f"TMDB 响应不是 JSON：{地址}") from None
 
     def _默认下载(self, 地址: str) -> bytes:
+        代理 = self.代理配置()
+        if 代理 is not None:
+            try:
+                应答 = 经代理取(地址, float(self.配置.超时秒), 代理,
+                            {"Accept": "image/*,*/*"})
+            except 代理错误 as 错:
+                raise 请求失败(0, f"图片走代理失败：{self._脱敏(str(错))}") from None
+            if 应答.状态码 >= 400:
+                raise 请求失败(int(应答.状态码), f"图片 HTTP {应答.状态码}：{地址}")
+            return 应答.体
         请求对象 = urllib.request.Request(地址, headers={
             "User-Agent": "WangPanV2/2.0", "Accept": "image/*,*/*"})
         with urllib.request.urlopen(请求对象, timeout=float(self.配置.超时秒)) as 响应:
@@ -973,14 +1028,32 @@ def _解析演职员(数据: dict) -> list[参演]:
 
 
 def _工种(职务们: list[str]) -> 人物工种:
-    """把官方 ``job`` 映射到我们自己的工种枚举（一个人挂多个职务时取"最靠前"的那个）。"""
-    优先 = ((人物工种.导演, ("director",)),
-          (人物工种.编剧, ("writer", "screenplay", "story", "teleplay", "author")),
+    """把官方 ``job`` 映射到我们自己的工种枚举（一个人挂多个职务时取"最靠前"的那个）。
+
+    ⚠️ **导演必须精确匹配**：真机查《沙丘》(438631) 时发现，crew 里带 "Director"
+    字样的人一大堆 —— "First Assistant Director"（副导演）、"Second Assistant
+    Director"、"Casting Director"（选角导演）、"Art Director"（美术指导）、
+    "Second Unit Director"（第二摄制组）。按子串匹配会把这些**全算成导演**，
+    于是详情页"导演"一栏出现的是副导演，真正的维伦纽瓦反而排在后面。
+    官方给导演的 job 就是 ``Director``（剧集里有 ``Series Director``）。
+    """
+    精准 = {"director": 人物工种.导演, "co-director": 人物工种.导演,
+          "series director": 人物工种.导演}
+    优先 = ((人物工种.编剧, ("writer", "screenplay", "teleplay", "story", "author")),
           (人物工种.制片, ("producer",)),
           (人物工种.作曲, ("music", "composer", "theme song")))
+    #: 含关键词但**不是创作岗**的职务（别把"选角导演"当导演、"故事板画师"当编剧）
+    排除词 = ("assistant", "casting", "storyboard", "unit", "coordinator",
+           "supervisor", "department", "art director", "art department")
+    for 职务 in 职务们:
+        小写 = (职务 or "").strip().lower()
+        if 小写 in 精准:
+            return 精准[小写]
     for 工种, 关键词们 in 优先:
         for 职务 in 职务们:
-            小写 = (职务 or "").lower()
+            小写 = (职务 or "").strip().lower()
+            if any(坏 in 小写 for 坏 in 排除词):
+                continue
             if any(词 in 小写 for 词 in 关键词们):
                 return 工种
     return 人物工种.其它

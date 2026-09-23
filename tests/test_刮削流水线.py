@@ -32,11 +32,16 @@ from wangpan.scrape.扫描 import 扫描媒体库
 class 假TMDB:
     """跟真客户端同签名的最小实现：数据是造的，图片走 file://。"""
 
-    def __init__(self, 图片目录: Path) -> None:
+    def __init__(self, 图片目录: Path, 带集列表: bool = True) -> None:
         self.图片目录 = Path(图片目录)
         self.图片目录.mkdir(parents=True, exist_ok=True)
         self.请求次数 = 0
         self.搜索过的词: list[str] = []
+        #: 真 TMDB 的 `/tv/{id}` 里 **seasons[] 只有集数、没有集列表**（集要另外
+        #: 打 `/tv/{id}/season/{n}`）。默认 True 是为了兼容老测试；
+        #: 验"季集对齐"时必须设 False，否则假客户端会把真实现里的坑盖住。
+        self.带集列表 = 带集列表
+        self.取过的季: list[tuple[str, int]] = []
 
     # --- 配置 ---
     def 可用(self) -> bool:
@@ -106,15 +111,21 @@ class 假TMDB:
         条目.分级们 = [分级("US", "TV-14")]
         条目.海报 = 图片(图片类型.海报, "/st.jpg", None, 500, 750)
         第一季 = 季(季号=1, 标题="第 1 季", 简介="", 集数=3, 播出日期="2016-07-15")
-        for 号, 名 in ((1, "第一章"), (2, "第二章"), (3, "第三章")):
-            第一季.集们.append(集(季号=1, 集号=号, 标题=名, 播出日期="2016-07-15",
-                              时长分钟=48, 评分=8.0))
+        if self.带集列表:
+            for 号, 名 in ((1, "第一章"), (2, "第二章"), (3, "第三章")):
+                第一季.集们.append(集(季号=1, 集号=号, 标题=名, 播出日期="2016-07-15",
+                                  时长分钟=48, 评分=8.0))
         条目.季们.append(第一季)
         return 条目
 
     def 取季(self, 剧id: str, 季号: int) -> 季:
         self.请求次数 += 1
-        return 季(季号=季号, 标题=f"第 {季号} 季")
+        self.取过的季.append((str(剧id), int(季号)))
+        季对象 = 季(季号=季号, 标题=f"第 {季号} 季", 集数=3)
+        for 号, 名 in ((1, "第一章"), (2, "第二章"), (3, "第三章")):
+            季对象.集们.append(集(季号=季号, 集号=号, 标题=名,
+                              播出日期="2016-07-15", 时长分钟=48, 评分=8.0))
+        return 季对象
 
     def 取分级(self, 类型, id: str) -> list[分级]:
         return [分级("US", "PG-13")]
@@ -294,3 +305,83 @@ class 流水线测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 季集对齐测试(unittest.TestCase):
+    """剧集必须"挂得上文件"——这是真机测真 API 才暴露的坑。
+
+    真 TMDB 的 `/tv/{id}` 里 ``seasons[]`` **只有 episode_count，没有集列表**，
+    集要另外打 `/tv/{id}/season/{n}`。原来的流水线只取剧集详情就落库，
+    结果"剧集入库了、海报也下了，但一集文件都没挂上"（海报墙点进去播不了）。
+    这里的假客户端刻意照真 API 的形状来（`带集列表=False`），把这个坑钉死。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.临时 = 临时目录()
+        cls.根 = Path(cls.临时.name)
+        cls.媒体 = cls.根 / "媒体"
+        cls.图床 = cls.根 / "假CDN"
+        造库(cls.媒体, cls.图床)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.临时.cleanup()
+
+    def _服务(self, 带集列表: bool, 抓季集详情: bool, 名字: str):
+        库 = 资料库(self.根 / f"库_{名字}.db")
+        self.addCleanup(库.关闭)
+        客户端 = 假TMDB(self.图床, 带集列表=带集列表)
+        服务 = 刮削服务(库, 客户端, 图片缓存(self.根 / f"图_{名字}"),
+                    刮削设置(最小文件字节=1024, 抓季集详情=抓季集详情))
+        self.addCleanup(服务.关闭)
+        return 库, 客户端, 服务
+
+    def test_真API形状的剧集也要挂上文件(self):
+        库, 客户端, 服务 = self._服务(带集列表=False, 抓季集详情=True, 名字="对齐")
+        服务.扫库([self.媒体 / "Shows" / "怪奇物语 (2016)"])
+        结果 = 服务.续跑()
+        self.assertEqual(结果.失败, 0, f"不该失败：{结果.错误们}")
+        行们 = 库.列表(查询条件(关键词="怪奇"))
+        self.assertTrue(行们)
+        条目 = 库.取媒体(int(行们[0]["id"]))
+        第一季 = next(s for s in 条目.季们 if s.季号 == 1)
+        self.assertEqual(len(第一季.集们), 3, "集列表要靠逐季详情补上")
+        self.assertEqual(第一季.集们[0].标题, "第一章")
+        挂了 = [c for c in 第一季.集们 if c.文件路径]
+        self.assertEqual(len(挂了), 3, "本地三集都要挂上")
+        # 本地有 S00E01（特别篇）也有 S01E01~03 → 只抓这两季，第 2/3 季不碰
+        self.assertEqual(客户端.取过的季, [("66732", 0), ("66732", 1)],
+                         "只该抓本地有文件的那几季")
+        特别篇 = next(s for s in 条目.季们 if s.季号 == 0)
+        self.assertEqual(特别篇.标题, "特别篇")
+        self.assertTrue(any(c.文件路径 for c in 特别篇.集们),
+                        "特别篇的文件也要挂上（本地确实有）")
+        文件们 = {Path(r["路径"]).name for r in 库.文件们(int(行们[0]["id"]))}
+        self.assertIn("怪奇物语 S01E01.mkv", 文件们)
+
+    def test_关掉逐季详情就用本地文件名兜底(self):
+        库, 客户端, 服务 = self._服务(带集列表=False, 抓季集详情=False, 名字="兜底")
+        服务.扫库([self.媒体 / "Shows" / "怪奇物语 (2016)"])
+        服务.续跑()
+        行们 = 库.列表(查询条件(关键词="怪奇"))
+        条目 = 库.取媒体(int(行们[0]["id"]))
+        第一季 = next(s for s in 条目.季们 if s.季号 == 1)
+        挂了 = [c for c in 第一季.集们 if c.文件路径]
+        self.assertEqual(len(挂了), 3, "不抓季详情也必须把本地文件挂到集上")
+        self.assertEqual(客户端.取过的季, [], "关了就不该打季详情的请求")
+        self.assertTrue(all(c.标题 for c in 挂了), "标题要有（本地文件名兜底）")
+
+    def test_只抓本地有的季_不多打请求(self):
+        """20 季的剧不该全抓：只有本地有文件的季才值得打一次详情。"""
+        目录 = self.根 / "多季剧" / "某剧 (2020)" / "Season 02"
+        目录.mkdir(parents=True, exist_ok=True)
+        (目录 / "某剧 S02E01.mkv").write_bytes(b"m" * (2 * 1024 * 1024))
+        库 = 资料库(self.根 / "库_多季.db")
+        self.addCleanup(库.关闭)
+        客户端 = 假TMDB(self.图床)
+        服务 = 刮削服务(库, 客户端, 图片缓存(self.根 / "图_多季"),
+                    刮削设置(最小文件字节=1024, 抓季集详情=True))
+        self.addCleanup(服务.关闭)
+        结果 = 服务.刮路径(目录 / "某剧 S02E01.mkv")
+        self.assertGreaterEqual(结果.跳过 + 结果.成功 + 结果.需要确认, 1)

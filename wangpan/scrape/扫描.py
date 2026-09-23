@@ -101,12 +101,24 @@ class 扫描结果:
 
     @property
     def 剧集数(self) -> int:
-        return len({x.路径 for x in self.条目们 if x.类型 is 媒体类型.剧集
-                    and x.集号 is None})
+        """有几部剧（按剧文件夹去重）。
+
+        ⚠️ 不能只数"没有集号的那些单元"：一部剧在扫描结果里是**一集一个单元**，
+        那样数出来永远是 0（真机上看到"发现 3 个单元（电影 1｜剧集 0）"，
+        另外 2 个单元像凭空消失了一样）。
+        """
+        return len({x.路径 for x in self.条目们 if x.类型 is 媒体类型.剧集})
+
+    @property
+    def 集数(self) -> int:
+        """扫到多少集（单元里有集号的那些）。"""
+        return sum(1 for x in self.条目们
+                   if x.类型 is 媒体类型.剧集 and x.集号 is not None)
 
     def 摘要(self) -> str:
+        集 = f"（{self.集数} 集）" if self.集数 else ""
         return (f"扫描 {self.扫描目录数} 个目录：发现 {len(self.条目们)} 个单元"
-                f"（电影 {self.电影数}｜剧集 {self.剧集数}）"
+                f"（电影 {self.电影数}｜剧集 {self.剧集数}{集}）"
                 f"｜跳过文件 {self.跳过文件数}｜跳过目录 {self.跳过目录数}")
 
 
