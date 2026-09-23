@@ -24,6 +24,7 @@ from typing import Callable, Optional
 
 from PySide6.QtGui import QPainter
 
+from .记忆 import 弹幕记忆
 from .模型 import 弹幕, 弹幕池, 弹幕配置, 默认配置, 来源标识
 from .渲染 import 弹幕渲染器
 
@@ -62,7 +63,10 @@ class 弹幕控制器:
         self._当前视频毫秒 = 0
         self._上次平滑毫秒 = 0.0
         self.装载结果 = 装载结果()
-        self.统计 = {"装载次数": 0, "过滤前": 0, "过滤后": 0, "偏移调整次数": 0}
+        #: 逐集记忆（同一个文件下次自动装好；用户选过的不会被自动匹配覆盖）
+        self.记忆 = 弹幕记忆()
+        self.统计 = {"装载次数": 0, "过滤前": 0, "过滤后": 0, "偏移调整次数": 0,
+                   "记忆命中": 0}
 
     # ---------------- 装载 ----------------
 
@@ -75,10 +79,25 @@ class 弹幕控制器:
         return self.装载结果
 
     def 装载(self, 素材, 源们=None, 自动阈值: float = 82.0) -> 装载结果:
-        """按素材（文件/直链）找弹幕：调各源匹配 → 打分决策 → 取弹幕。"""
+        """按素材（文件/直链）找弹幕：**先查逐集记忆** → 否则调各源匹配 → 打分决策 → 取弹幕。"""
         from .匹配 import 找弹幕
         from .源 import 建默认源
         源们 = list(源们) if 源们 else 建默认源()
+        记忆命中 = 素材.额外.get("路径") or getattr(素材, "路径", None) or 素材.文件名
+        记录 = self.记忆.取(记忆命中) if 记忆命中 else None
+        if 记录 is not None and 记录.标识:
+            # 记过的直接按记录取，省一次搜索（也避免"同一部片子两次匹配到不同集"）
+            池 = self._从记忆取(记录, 源们)
+            if 池 is not None and len(池):
+                self.记忆.记命中(记忆命中)
+                self.统计["记忆命中"] += 1
+                self._原始池 = 池
+                self.装载结果 = 装载结果(成功=True, 条数=len(池),
+                                  来源=f"记忆：{记录.标题}" if 记录.标题 else "记忆")
+                self.统计["装载次数"] += 1
+                self._日志(f"[弹幕] 用记忆装载 {len(池)} 条（{记录.可读()}）")
+                self._重算显示池()
+                return self.装载结果
         try:
             决策 = 找弹幕(素材, 源们)
         except Exception as 错:  # noqa: BLE001 - 找弹幕失败不能影响播放
@@ -114,11 +133,63 @@ class 弹幕控制器:
         if 本地 is not None and len(本地):
             池 = 弹幕池.合并([池, 本地])
         self._原始池 = 池
+        # 记下来：下次同一个文件直接装，不用再匹配
+        self.记忆.记(记忆命中, str(采纳.原始.get("源") or "在线"), 采纳.标识,
+                   采纳.标题, 采纳.集标题, 采纳.集号, 用户选定=False)
+        self.记忆.存()
         self.装载结果 = 装载结果(成功=True, 条数=len(池), 来源=采纳.标题 or "在线")
         self.统计["装载次数"] += 1
         self._日志(f"[弹幕] 已装载 {len(池)} 条（{采纳.标题} {采纳.集标题}）")
         self._重算显示池()
         return self.装载结果
+
+    def 用候选装载(self, 素材, 候选, 源们=None, 用户选定: bool = True) -> 装载结果:
+        """用户在候选列表里点了一个 → 取弹幕并**记为用户选定**（自动匹配以后不许覆盖）。"""
+        from .源 import 建默认源
+        源们 = list(源们) if 源们 else 建默认源()
+        池 = None
+        for 源 in 源们:
+            try:
+                if not 源.能匹配():
+                    continue
+                池 = 源.取弹幕(候选.标识)
+                if 池 is not None and len(池):
+                    break
+            except Exception as 错:  # noqa: BLE001
+                self._日志(f"[弹幕] {源.名字} 取弹幕失败：{错}")
+                池 = None
+        if 池 is None or not len(池):
+            self.装载结果 = 装载结果(说明="这个候选没取到弹幕")
+            return self.装载结果
+        键 = getattr(素材, "路径", None) or 素材.文件名
+        self.记忆.记(键, str(候选.原始.get("源") or "用户"), 候选.标识, 候选.标题,
+                   候选.集标题, 候选.集号, 用户选定=用户选定)
+        self.记忆.存()
+        self.装载本地(池, 候选.标题 or "用户选定")
+        self._日志(f"[弹幕] 用户选定：{候选.标题} {候选.集标题}（已记住）")
+        return self.装载结果
+
+    def _从记忆取(self, 记录, 源们) -> Optional[弹幕池]:
+        for 源 in 源们:
+            try:
+                if getattr(源, "标识", "") != 记录.源 and 记录.源 not in ("", "在线", "用户"):
+                    continue
+                池 = 源.取弹幕(记录.标识)
+                if 池 is not None and len(池):
+                    return 池
+            except Exception:  # noqa: BLE001
+                continue
+        # 源标识对不上（比如换过版本）→ 挨个试一次
+        for 源 in 源们:
+            try:
+                if not 源.能匹配():
+                    continue
+                池 = 源.取弹幕(记录.标识)
+                if 池 is not None and len(池):
+                    return 池
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
     def _找本地(self, 素材) -> Optional[弹幕池]:
         try:

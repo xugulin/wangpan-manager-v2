@@ -469,20 +469,14 @@ class 主窗口(QMainWindow):
                                        "没把握自动选，帮你列出来（分数越高越像）：",
                                        名字们, 0, False)
             if 好 and 选:
+                # 走控制器的用户选定通道：取弹幕并记住这个选择（下次打开自动装好）
                 采纳 = 结果.候选们[名字们.index(选)]
-                池 = None
-                for 源 in 建默认源():
-                    try:
-                        if 源.能匹配():
-                            池 = 源.取弹幕(采纳.标识)
-                            if 池 is not None and len(池):
-                                break
-                    except Exception:  # noqa: BLE001
-                        continue
-                if 池 is not None and len(池):
-                    self.弹幕.装载本地(池, 采纳.标题 or "在线")
-                    self.状态.showMessage(f"🗨 已装载 {len(池)} 条（{采纳.标题}）")
-                    return
+                装载 = self.弹幕.用候选装载(素材, 采纳, 建默认源(), 用户选定=True)
+                if 装载.成功:
+                    self.状态.showMessage(f"🗨 已装载 {装载.条数} 条（{装载.来源}），并记住了这个匹配")
+                else:
+                    self.状态.showMessage(f"🗨 {装载.说明 or '这个候选没取到弹幕'}")
+                return
         self.状态.showMessage(f"🗨 {结果.说明 or '没找到弹幕'}")
 
     def _刮削路径(self, 路径: str) -> None:
