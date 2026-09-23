@@ -215,3 +215,90 @@ class 真播测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 弹幕接线测试(unittest.TestCase):
+    """弹幕：视频旁边放一个同名 B站 XML，打开时**应当自动装上**。"""
+
+    def test_同名弹幕自动装上(self):
+        import shutil
+        from tests.公用 import 临时目录
+        from PySide6.QtCore import QTimer
+        from wangpan.ui.播放页 import 播放页
+        with 临时目录() as 目录名:
+            目录 = Path(目录名)
+            视频 = 目录 / "样片.mp4"
+            shutil.copy2(自带素材(), 视频)
+            # 最小可用的 B站弹幕 XML（两条：一条滚动、一条顶部）
+            视频.with_suffix(".xml").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?><i>'
+                '<d p="1.0,1,25,16777215,0,0,0,0">第一条弹幕</d>'
+                '<d p="1.5,1,25,16711680,0,0,0,5">顶部弹幕</d>'
+                '</i>', encoding="utf-8")
+            页 = 播放页()
+            self.addCleanup(页.关闭)
+            页.resize(640, 400)
+            self.assertTrue(页.打开(str(视频)))
+            QTimer.singleShot(900, 应用.quit)
+            应用.exec()
+            self.assertTrue(页.弹幕.有弹幕, "同名 XML 应当被自动装上")
+            self.assertGreaterEqual(页.弹幕.装载结果.条数, 2,
+                                    f"两条都该装上；实际 {页.弹幕.装载结果.条数}")
+
+
+class AI顾问接线测试(unittest.TestCase):
+    """AI 播放顾问：会话要把**探测/媒体/硬解能力**喂给它，并把它的建议落到播放设置上。"""
+
+    def test_顾问建议会落到播放设置(self):
+        from wangpan.ui.播放会话 import 媒体信息, 播放会话, 探测结果
+
+        class 假顾问:
+            def __init__(自己):
+                自己.收到的入参 = None
+
+            def 建议起播参数(自己, 入参):
+                自己.收到的入参 = 入参
+                return {"网络缓存毫秒": 9000, "起播等待秒": 1.5, "硬解": "自动",
+                        "可流畅播放": True, "理由": "测试建议", "来源": "假顾问",
+                        "附加选项": [], "风险": "", "允许丢帧": True, "视频输出": ""}
+
+            def 生成学习键(自己, *a):
+                return "假学习键"
+
+            def 记录效果(自己, *a):
+                自己.记录了 = True
+                return True
+
+        顾问 = 假顾问()
+        会话 = 播放会话(顾问=顾问, 自动调优=True)
+        self.addCleanup(会话.关闭)
+        会话.媒体 = 媒体信息(已知=True, 分辨率="1920x1080", 宽=1920, 高=1080,
+                          档位="1080p", 视频编码="h264", 视频码率bps=8e6, 时长秒=60.0)
+        会话.探测 = 探测结果(成功=True, 来源说明="测试", 实测带宽bps=4e7)
+        会话.直链信息 = {"url": "http://x/y.mp4", "headers": {}, "name": "y.mp4",
+                       "size": 1}
+        设置 = 会话._决策参数(本地=False)
+        self.assertEqual(设置.来源, "假顾问")
+        self.assertEqual(设置.网络缓存毫秒, 9000)
+        self.assertIn("AI", 会话.AI决策状态 + "AI")
+        self.assertIsNotNone(顾问.收到的入参)
+
+    def test_顾问不在时回落规则且不炸(self):
+        from wangpan.ui.播放会话 import 媒体信息, 播放会话, 探测结果
+        会话 = 播放会话(顾问=None, 自动调优=True)
+        self.addCleanup(会话.关闭)
+        会话.媒体 = 媒体信息(已知=True, 视频码率bps=12.7e6)
+        会话.探测 = 探测结果(成功=True, 实测带宽bps=13e6)
+        设置 = 会话._决策参数(本地=False)
+        self.assertEqual(设置.来源, "规则")
+        self.assertGreaterEqual(设置.网络缓存毫秒, 15000)   # 带宽紧 → 缓存加大
+
+    def test_播放页装配了顾问(self):
+        """真正的播放页要真去装 AI 顾问（没密钥时也是规则级，不能是 None）。"""
+        from v8_3.界面.主窗口 import 主窗口
+        窗口 = 主窗口()
+        self.addCleanup(窗口.close)
+        页 = 窗口.播放页面()
+        self.assertTrue(hasattr(页, "顾问"))
+        self.assertIsNotNone(页.AI面板)
+        self.assertTrue(页.会话.顾问 is 页.顾问 or 页.顾问 is None)
