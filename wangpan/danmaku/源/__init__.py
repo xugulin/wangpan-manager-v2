@@ -23,6 +23,7 @@ from typing import Optional
 
 from .接口 import (弹幕源, 弹幕源错误, 匹配结果, 素材信息, 请求, 应答,
                  传输函数, urlopen传输, 用户代理)
+from .animeko import Animeko源, 解析弹幕, 解析搜索
 from .弹弹play import (弹弹play源, 前16MB的MD5, 生成签名头, 纯接口路径, 解析条目,
                     解析响应, 解析匹配响应, 解析搜索响应, 检查业务状态, 读凭证,
                     默认缓存目录, 默认配置路径, 官方基地址, 哈希字节数,
@@ -30,7 +31,7 @@ from .弹弹play import (弹弹play源, 前16MB的MD5, 生成签名头, 纯接�
 from .本地 import (本地源, 解析B站XML, 解析我们的JSON, 导出为JSON, 找同名弹幕文件,
                  读同名字幕弹幕, 读文本文件, B站模式号)
 
-__all__ = [
+__all__ = ["Animeko源", "解析弹幕", "解析搜索", 
     # 接口
     "弹幕源", "弹幕源错误", "素材信息", "匹配结果",
     "请求", "应答", "传输函数", "urlopen传输", "用户代理",
@@ -70,7 +71,17 @@ def 建默认源(配置: Optional[dict] = None) -> list[弹幕源]:
         logging.getLogger(__name__).warning("建默认源：忽略了不认识的配置项 %s", 未认)
     要本地 = bool(配置.get("本地", True))
     网络配置 = {键: 值 for 键, 值 in 配置.items() if 键 in 允许的键}
-    源们: list[弹幕源] = [弹弹play源(**网络配置)]
+    # 顺序 = 优先级：Animeko 公益弹幕（**不需要凭据**，实测可用）排最前，
+    # 其次是弹弹play（需要 AppId+签名，个人开发者要审核），最后是本地文件兜底。
+    # 这样"什么凭据都没配"的用户也能拿到在线弹幕。
+    源们: list[弹幕源] = [Animeko源()]
+    网络配置.pop("appId", None)      # 这些是弹弹play 专用参数，别透传给 Animeko
+    网络配置.pop("appSecret", None)
+    网络配置.pop("chConvert", None)
+    网络配置.pop("读哈希", None)
+    网络配置.pop("配置路径", None)
+    网络配置.pop("读环境", None)
+    源们.append(弹弹play源(**网络配置))
     if 要本地:
         源们.append(本地源())
     return 源们

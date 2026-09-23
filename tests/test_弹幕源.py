@@ -684,20 +684,28 @@ class 本地源测试(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class 建默认源测试(unittest.TestCase):
-    def test_默认两个源(self):
+    """默认源链：**Animeko（公开，无需凭据）→ 弹弹play（要 AppId）→ 本地文件**。
+
+    顺序不是随便排的：弹弹play 现在连 /match 都要求 AppId 签名（真机实测 403），
+    而个人开发者拿 AppId 要审核 → 把"不需要凭据就能用"的源放最前，
+    没配任何 key 的用户也能拿到在线弹幕。
+    """
+
+    def test_默认三个源且顺序对(self):
         with 临时目录() as 目录:
             源们 = 建默认源({"传输": 假传输(弹幕响应("一")), "读环境": False,
                            "缓存目录": Path(目录) / "缓存",
                            "配置路径": Path(目录) / "没有.json"})
-            self.assertEqual([源.标识 for 源 in 源们], ["dandanplay", "local"])
-            self.assertEqual([源.能匹配() for 源 in 源们], [True, False])
+            self.assertEqual([源.标识 for 源 in 源们],
+                             ["animeko", "dandanplay", "local"])
+            self.assertEqual([源.能匹配() for 源 in 源们], [True, True, False])
 
     def test_可以只要网络源(self):
         with 临时目录() as 目录:
             源们 = 建默认源({"本地": False, "传输": 假传输(弹幕响应("一")),
                            "读环境": False, "缓存目录": Path(目录) / "缓存",
                            "配置路径": Path(目录) / "没有.json"})
-            self.assertEqual([源.标识 for 源 in 源们], ["dandanplay"])
+            self.assertEqual([源.标识 for 源 in 源们], ["animeko", "dandanplay"])
 
     def test_不认识的配置项只警告不报错(self):
         with 临时目录() as 目录:
@@ -706,7 +714,7 @@ class 建默认源测试(unittest.TestCase):
                                "缓存目录": Path(目录) / "缓存",
                                "配置路径": Path(目录) / "没有.json",
                                "这个是错的键": 1})
-            self.assertEqual(len(源们), 2)
+            self.assertEqual(len(源们), 3)
 
     def test_没有凭证就发不带鉴权的请求并写进日志(self):
         with 临时目录() as 目录:
