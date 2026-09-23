@@ -63,6 +63,8 @@ def main() -> int:
     解析.add_argument("--代理", default="")
     解析.add_argument("--截图目录", default="/tmp")
     解析.add_argument("--开界面", action="store_true")
+    解析.add_argument("--队列", action="store_true",
+                    help="再验一遍「拿不准 → 队列 → 人工采纳」（用一个年份写错的目录制造歧义）")
     解析.add_argument("--保留库", action="store_true",
                     help="默认跑完还原 数据/资料库.db（不污染用户数据）")
     参数 = 解析.parse_args()
@@ -128,7 +130,7 @@ def main() -> int:
     库 = 资料库(临时根 / "库.db")
     缓存 = 图片缓存(临时根 / "图缓存", 代理=配置.代理)
     服务 = 刮削服务(库, 客户端, 缓存,
-                刮削设置(本批上限=10, 最小文件字节=1024, 抓季集详情=True),
+                刮削设置(本批上限=10, 最小文件字节=1024, 抓季集详情=True, 写NFO=True),
                 日志回调=lambda t: 记("[服务] " + t))
     try:
         服务.扫库([媒体])
@@ -146,9 +148,19 @@ def main() -> int:
             记(f"        文件 {len(文件们)} 个：" + "；".join(
                 Path(r["路径"]).name for r in 文件们))
         记(f"[缓存] {缓存.统计一下().摘要()}")
+        nfo们 = sorted(p.relative_to(媒体) for p in 媒体.rglob("*.nfo"))
+        记(f"[NFO] 写出 {len(nfo们)} 个：{ [str(x) for x in nfo们 ] }")
+        文件 = 媒体 / "沙丘 (2021)" / "沙丘 (2021).nfo"
+        if 文件.is_file():
+            for 行 in 文件.read_text(encoding="utf-8").splitlines()[:8]:
+                记("[NFO] " + 行.strip())
     finally:
         服务.关闭()
         库.关闭()
+
+    # ---- 2.5) 可选：真 API 上的"拿不准 → 队列 → 人工采纳" ----
+    if 参数.队列:
+        _验队列(_验队列目录(临时根), 临时根, 记, 配置)
 
     # ---- 3) 可选：真窗口截图 ----
     if 参数.开界面:
@@ -161,6 +173,52 @@ def main() -> int:
     记录.write_text("\n".join(证据), encoding="utf-8")
     print(f"（证据也写了一份：{记录}）")
     return 0
+
+
+def _验队列目录(根: Path) -> Path:
+    """造一个"注定拿不准"的目录：片名对得上但**年份写错一年**（真机上就是这么触发的）。"""
+    媒体 = 根 / "队列媒体" / "沙丘 (2022)"
+    媒体.mkdir(parents=True, exist_ok=True)
+    (媒体 / "沙丘 (2022) 1080p.mkv").write_bytes(b"Q" * (21 * 1024 * 1024))
+    return 媒体
+
+
+def _验队列(目录: Path, 根: Path, 记, 配置) -> None:
+    from wangpan.scrape.库 import 资料库
+    from wangpan.scrape.图片 import 图片缓存
+    from wangpan.scrape.服务 import 刮削服务, 刮削设置
+    from wangpan.scrape.tmdb import TMDB客户端
+    库 = 资料库(根 / "队列库.db")
+    缓存 = 图片缓存(根 / "队列图", 代理=配置.代理)
+    客户端 = TMDB客户端(配置)
+    服务 = 刮削服务(库, 客户端, 缓存,
+                刮削设置(最小文件字节=1024, 抓季集详情=False, 写NFO=True),
+                日志回调=lambda t: 记("[队列] " + t))
+    try:
+        服务.扫库([目录])
+        结果 = 服务.续跑()
+        记(f"[队列] 扫刮结果：{结果.摘要()}")
+        项们 = 库.待确认()
+        记(f"[队列] 待确认 {len(项们)} 条｜库里条目数 {库.计数()}（拿不准的不该入库）")
+        if not 项们:
+            记("[队列] ⚠ 这次没触发待确认（换了数据？）")
+            return
+        项 = 项们[0]
+        for 候选 in 项.候选们[:4]:
+            记(f"[队列]   候选 {候选.可读()}")
+        选中 = 项.候选们[0]
+        记(f"[队列] 人工采纳：{选中.标题}（tmdb {选中.来源标识}）")
+        结果2 = 服务.采纳候选(项.路径, 选中)
+        记(f"[队列] 采纳结果：{结果2.摘要()}｜待确认剩 {库.待确认数()}")
+        for 行 in 库.全部("SELECT id,标题,年份,tmdb_id FROM 媒体"):
+            记(f"[队列] 入库：id={行['id']}｜{行['标题']}（{行['年份']}）｜"
+               f"tmdb={行['tmdb_id']}")
+        记(f"[队列] NFO：{ [str(p.name) for p in 目录.rglob('*.nfo')] }")
+    except Exception as 错:  # noqa: BLE001
+        记(f"[队列] ✗ 验证失败：{type(错).__name__}: {错}")
+    finally:
+        服务.关闭()
+        库.关闭()
 
 
 def _开界面截图(参数, 媒体: Path, 记, 配置) -> None:
