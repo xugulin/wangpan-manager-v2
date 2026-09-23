@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = ["媒体类型", "人物工种", "图片类型", "媒体条目", "季", "集", "人物",
-           "参演", "图片", "分级", "匹配候选", "刮削结果"]
+           "参演", "图片", "分级", "匹配候选", "刮削结果", "待确认项"]
 
 
 class 媒体类型(str, Enum):
@@ -200,6 +200,44 @@ class 匹配候选:
         年份 = f"（{self.年份}）" if self.年份 else ""
         return f"{self.分数:5.1f} 分｜{self.标题}{年份}｜{self.类型.value}｜{self.理由}"
 
+    # ---- 序列化（"需要确认"的任务要跨进程/跨次启动活下来，见 库.py 的 刮削任务.候选）----
+
+    def 到字典(self) -> dict:
+        return {"来源标识": self.来源标识, "标题": self.标题, "原名": self.原名,
+                "年份": self.年份, "类型": self.类型.value, "简介": self.简介,
+                "海报远端": self.海报远端, "热度": self.热度, "分数": self.分数,
+                "理由": self.理由}
+
+    @classmethod
+    def 从字典(cls, 数据: object) -> "匹配候选":
+        """从 JSON 字典还原；坏数据**不抛异常**（队列界面不能因为一条脏记录打不开）。"""
+        if not isinstance(数据, dict):
+            return cls()
+        try:
+            年份 = int(数据["年份"]) if 数据.get("年份") not in (None, "") else None
+        except (TypeError, ValueError):
+            年份 = None
+        try:
+            类型 = 媒体类型(str(数据.get("类型") or "unknown"))
+        except ValueError:
+            类型 = 媒体类型.未知
+        try:
+            分数 = float(数据.get("分数") or 0.0)
+        except (TypeError, ValueError):
+            分数 = 0.0
+        try:
+            热度 = float(数据.get("热度") or 0.0)
+        except (TypeError, ValueError):
+            热度 = 0.0
+        return cls(来源标识=str(数据.get("来源标识") or ""),
+                   标题=str(数据.get("标题") or ""),
+                   原名=str(数据.get("原名") or ""),
+                   年份=年份, 类型=类型,
+                   简介=str(数据.get("简介") or ""),
+                   海报远端=str(数据.get("海报远端") or ""),
+                   热度=热度, 分数=分数,
+                   理由=str(数据.get("理由") or ""))
+
 
 @dataclass
 class 刮削结果:
@@ -213,3 +251,36 @@ class 刮削结果:
     耗时秒: float = 0.0
     下载图片数: int = 0
     错误: str = ""
+
+
+@dataclass
+class 待确认项:
+    """刮削队列里的一条"拿不准，等人点一下"的记录。
+
+    为什么要有这个类型而不是直接把 sqlite3.Row 抛给界面：
+    * 界面不该知道库表列名（改表就崩）；
+    * ``候选`` 列是 JSON 文本，要在这里**一次性**解析好（脏数据也不能让界面崩）；
+    * 队列项的"人话"（:meth:`一句话`）只该有一处实现，列表与状态栏共用。
+    """
+
+    路径: str = ""
+    标题: str = ""                 # 从文件名/NFO 猜的标题（还没有 TMDB 身份时的显示名）
+    年份: Optional[int] = None
+    类型: 媒体类型 = 媒体类型.未知
+    说明: str = ""
+    候选们: list[匹配候选] = field(default_factory=list)
+    尝试次数: int = 0
+    更新时间: float = 0.0
+
+    @property
+    def 文件名(self) -> str:
+        return Path(self.路径).name if self.路径 else ""
+
+    def 一句话(self) -> str:
+        年份 = f"（{self.年份}）" if self.年份 else ""
+        名字 = self.标题 or self.文件名 or "（未知）"
+        return f"{名字}{年份}｜候选 {len(self.候选们)} 个｜{self.说明}"
+
+    def 最佳(self) -> Optional[匹配候选]:
+        """分数最高的候选（列表默认选中它，用户多数时候回车即可）。"""
+        return max(self.候选们, key=lambda c: c.分数, default=None)

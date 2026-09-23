@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import unittest
@@ -215,7 +216,7 @@ class 客户端测试(unittest.TestCase):
         self._临时.__exit__(None, None, None)
 
     def 建(self, 处理, 下载=None, 现在=None, 睡眠=None, **配置项):
-        配置项.setdefault("token", "测试-Bearer-令牌")
+        配置项.setdefault("token", "TEST-Bearer-token-123")
         配置项.setdefault("缓存目录", self.根 / "缓存")
         传输 = 假传输(处理)
         客户端 = TMDB客户端(TMDB配置(**配置项), 请求=传输, 下载=下载, 现在=现在, 睡眠=睡眠)
@@ -271,10 +272,29 @@ class 配置测试(客户端测试):
         self.assertEqual(默认缓存目录().parent.name, "缓存")
 
     def test_配置摘要不含密钥(self):
-        客户端, _ = self.建(固定(电影数据()), token="", api_key="超级秘密键")
+        客户端, _ = self.建(固定(电影数据()), token="", api_key="TOPSECRET-key-1")
         摘要 = str(客户端.配置摘要())
-        self.assertNotIn("超级秘密键", 摘要)
+        self.assertNotIn("TOPSECRET-key-1", 摘要)
         self.assertIn("api_key", 摘要)          # 只说用哪种鉴权
+
+    def test_复制粘贴带进来的杂质会被清掉(self):
+        """真机踩点：从网页复制 token 常带上中文引号、尖括号、全角/零宽空格。"""
+        路径 = self.根 / "刮削.json"
+        路径.write_text(json.dumps({"tmdb": {
+            "token": "\u201cabc.DEF-123\u201d", "apiKey": "\u3000key.<456>\u200b"}},
+            ensure_ascii=False), encoding="utf-8")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            配置 = TMDB配置.从环境与配置(路径)
+        self.assertEqual(配置.token, "abc.DEF-123")
+        self.assertEqual(配置.api_key, "key.456")
+        self.assertEqual(配置.密钥问题(), "")
+
+    def test_中文凭据给一句人话(self):
+        """HTTP 头只吃 latin-1；不提前拦就会抛出 'latin-1' codec 那种没人看得懂的话。"""
+        配置 = TMDB配置(token="真实令牌")
+        self.assertIn("非 ASCII", 配置.密钥问题())
+        self.assertEqual(TMDB配置(token="ok-token").密钥问题(), "")
+        self.assertEqual(TMDB配置().密钥问题(), "")
 
     def test_署名文案是官方要求的那句(self):
         self.assertEqual(署名, "This product uses the TMDB API but is not endorsed or "
@@ -289,15 +309,15 @@ class 请求测试(客户端测试):
         客户端, 传输 = self.建(固定(电影数据()))
         客户端.取电影("438631")
         本次 = 传输.调用[0]
-        self.assertEqual(本次["头"]["Authorization"], "Bearer 测试-Bearer-令牌")
+        self.assertEqual(本次["头"]["Authorization"], "Bearer TEST-Bearer-token-123")
         self.assertNotIn("api_key", 本次["参数"])
         self.assertEqual(本次["方法"], "GET")
 
     def test_api_key走查询参数(self):
-        客户端, 传输 = self.建(固定(电影数据()), token="", api_key="键123")
+        客户端, 传输 = self.建(固定(电影数据()), token="", api_key="KEY-123")
         客户端.取电影("438631")
         本次 = 传输.调用[0]
-        self.assertEqual(本次["参数"]["api_key"], "键123")
+        self.assertEqual(本次["参数"]["api_key"], "KEY-123")
         self.assertNotIn("Authorization", 本次["头"])
 
     def test_搜电影_路径与参数(self):
@@ -515,7 +535,19 @@ class 缓存测试(客户端测试):
         客户端, _ = self.建(固定(电影数据()))
         客户端.取电影("438631")
         相对 = [str(p.relative_to(self.根 / "缓存")) for p in self.缓存文件们()]
-        self.assertIn(str(Path("movie") / "zh-CN" / "438631.json"), 相对)
+        self.assertIn(str(Path("官方") / "movie" / "zh-CN" / "438631.json"), 相对)
+
+    def test_换接口基地址不共用缓存(self):
+        """缓存按端点分区：否则"环回假服务/代理"缓存下来的数据会被当成 TMDB 的真数据。"""
+        官方, 传输1 = self.建(固定(电影数据()))
+        官方.取电影("438631")
+        self.assertEqual(传输1.次数, 1)
+        代理, 传输2 = self.建(固定(电影数据()), 接口基地址="http://127.0.0.1:9/3")
+        代理.取电影("438631")
+        self.assertEqual(传输2.次数, 1, "换了端点必须重新取，不能吃上一个端点的缓存")
+        相对 = sorted(str(p.relative_to(self.根 / "缓存")) for p in self.缓存文件们())
+        self.assertTrue(any(x.startswith("官方") for x in 相对))
+        self.assertTrue(any(x.startswith("端点_") for x in 相对))
 
     def test_缓存坏了当没有(self):
         客户端, 传输 = self.建(固定(电影数据()))
@@ -583,7 +615,7 @@ class 缓存测试(客户端测试):
 
 class 密钥不外泄测试(客户端测试):
     def test_异常里没有token(self):
-        密钥 = "绝密-Bearer-9f8e7d"
+        密钥 = "TOPSECRET-Bearer-9f8e7d"
 
         def 处理(本次, 次):
             raise RuntimeError(f"底层库把请求打出来了：Authorization: Bearer {密钥}")
@@ -594,7 +626,7 @@ class 密钥不外泄测试(客户端测试):
         self.assertIn("***", str(上下文.exception))
 
     def test_异常里没有api_key(self):
-        密钥 = "绝密apikey123"
+        密钥 = "TOPSECRET-apikey-123"
         客户端, 传输 = self.建(lambda 本次, 次: (_ for _ in ()).throw(
             RuntimeError(f"GET https://api.themoviedb.org/3/movie/1?api_key={密钥}")),
             token="", api_key=密钥)
@@ -605,7 +637,7 @@ class 密钥不外泄测试(客户端测试):
         self.assertIn("api_key=***", 文本)
 
     def test_日志里没有token(self):
-        密钥 = "绝密-Bearer-abc123"
+        密钥 = "TOPSECRET-Bearer-abc123"
 
         def 处理(本次, 次):
             if 次 == 1:
@@ -621,7 +653,7 @@ class 密钥不外泄测试(客户端测试):
     def test_网络错误消息里没有完整URL(self):
         def 处理(本次, 次):
             raise RuntimeError(f"连接失败：{本次['地址']}?api_key=秘密")
-        客户端, 传输 = self.建(处理, token="", api_key="秘密")
+        客户端, 传输 = self.建(处理, token="", api_key="SECRET")
         with self.assertRaises(请求失败) as 上下文:
             客户端.取电影("1")
         self.assertNotIn("秘密", str(上下文.exception))

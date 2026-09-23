@@ -243,6 +243,31 @@ class 渲染测试(unittest.TestCase):
         self.assertEqual(条数, 0)
         self.assertEqual(亮, 0)
 
+    def test_同一条弹幕不会被反复装进在屏表(self):
+        """真机实测的 bug：在屏表 113 条、去重后只有 3 条 —— 同一条被画了几十遍。
+
+        根因：`分配()` 对**早就排过**的弹幕也会返回定位（绘制要用那位置），
+        渲染器照着返回值就往在屏表里加，于是每一帧都加一遍。CPU 白烧，计数也失真。
+        """
+        渲染 = 弹幕渲染器(弹幕配置())
+        池 = 造池(60, 起始=0, 间隔=800)
+        渲染.设置弹幕池(池, 现在毫秒=0)
+        最大在屏 = 0
+        for 帧 in range(120):                       # 覆盖 96 秒，每帧都画
+            时间 = 1000 + 帧 * 50
+            条数, _, _ = self._画一帧(渲染, 时间)
+            表 = list(渲染._装载表)
+            键 = [(d.标识, d.毫秒, d.文本) for d in 表]
+            self.assertEqual(len(键), len(set(键)),
+                             f"第 {帧} 帧在屏表里有重复：{len(键)} 条，"
+                             f"去重后只剩 {len(set(键))} 条")
+            self.assertLessEqual(条数, len(表), "画出来的不该多于在屏表里的")
+            最大在屏 = max(最大在屏, len(表))
+        self.assertLessEqual(最大在屏, len(池), "在屏表不该超过池子大小")
+        self.assertLessEqual(渲染._装入数, len(池),
+                             "每条弹幕只该被装进在屏表一次")
+        self.assertLessEqual(渲染.分配器.统计()["在册"], len(池))
+
 
 class 平滑器测试(unittest.TestCase):
     def test_抖动会被压住(self):

@@ -416,6 +416,8 @@ class 海报墙页(QWidget):
     状态变化 = Signal(str)        # 给状态栏用的一句话
     #: 约定的四个信号之外多一个：详情页弹窗的"手动匹配"要转发出去（主窗口接线用）
     要手动匹配 = Signal(int)
+    #: 工具条上的「✅ 待确认 N」被点了（主窗口去开待确认队列那一屏）
+    要处理待确认 = Signal()
 
     def __init__(self, 库: 资料库, 图片缓存, 父=None,
                  页大小: int = 默认页大小,
@@ -569,6 +571,11 @@ class 海报墙页(QWidget):
         self.扫描按钮.setToolTip("选一个目录，交给刮削流程（本页只负责把目录发出去）")
         self.扫描按钮.clicked.connect(self.选目录扫描)
         行.addWidget(self.扫描按钮)
+        self.待确认数 = 0
+        self.待确认按钮 = QPushButton("✅ 待确认")
+        self.待确认按钮.setToolTip("自动匹配拿不准的条目会进这个队列（现在是空的）")
+        self.待确认按钮.clicked.connect(self.要处理待确认.emit)
+        行.addWidget(self.待确认按钮)
         return 行
 
     # ---------------- 查询 ----------------
@@ -1073,6 +1080,21 @@ class 海报墙页(QWidget):
         if 全量:
             self._库统计文本 = self.库.统计().摘要()
             self._缓存统计文本 = self.缓存.统计一下().摘要()
+            self._刷待确认按钮()
         筛选 = f"筛选 {self._总数} 部 · 已显示 {self.模型.已加载条数()}"
         self.状态标签.setText("　｜　".join(
             x for x in (self._库统计文本, 筛选, self._缓存统计文本) if x))
+
+    def _刷待确认按钮(self) -> None:
+        """工具条上的「✅ 待确认 N」：数字就是队列长度（点开就是那一屏）。"""
+        数 = 0
+        try:
+            数 = int(self.库.待确认数())
+        except Exception:  # noqa: BLE001 - 老库/异常都不该让海报墙打不开
+            数 = 0
+        self.待确认数 = 数
+        self.待确认按钮.setText(f"✅ 待确认 {数}" if 数 else "✅ 待确认")
+        self.待确认按钮.setEnabled(True)
+        self.待确认按钮.setToolTip(
+            f"有 {数} 条刮削拿不准，等人点一下（选候选 → 采纳 → 入库）"
+            if 数 else "自动匹配拿不准的条目会进这个队列（现在是空的）")

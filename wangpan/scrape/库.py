@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -26,15 +27,13 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .模型 import (人物, 人物工种, 图片, 图片类型, 媒体条目, 媒体类型, 参演, 分级,
-                季, 集)
+                季, 集, 待确认项, 匹配候选)
 
 __all__ = ["资料库", "库统计", "查询条件"]
 
-表结构 = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS 媒体 (
+#: 媒体表的定义（**单独一份**：老库要按它重建一次，见 :meth:`资料库._迁移`）
+媒体表 = """
+CREATE TABLE {名字} (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     类型          TEXT NOT NULL DEFAULT 'unknown',
     标题          TEXT NOT NULL DEFAULT '',
@@ -59,8 +58,19 @@ CREATE TABLE IF NOT EXISTS 媒体 (
     制片公司      TEXT NOT NULL DEFAULT '',
     刮削时间      REAL NOT NULL DEFAULT 0,
     更新时间      REAL NOT NULL DEFAULT 0,
-    UNIQUE(来源, tmdb_id)
+    -- 去重身份：有 TMDB id 时是 'tmdb:123'，只有本地文件时是 'path:<哈希>'。
+    -- 为什么不能只看 (来源, tmdb_id)：**没有 id 的本地条目会在 '' 上互相顶掉**
+    -- （UNIQUE 约束把 '' 也当一个值），结果"第二部没刮到的片子覆盖了第一部"。
+    唯一键        TEXT NOT NULL DEFAULT ''
 );
+"""
+
+表结构 = ("""
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+"""
+        + 媒体表.format(名字="IF NOT EXISTS 媒体")
+        + """
 CREATE INDEX IF NOT EXISTS 媒体_标题 ON 媒体(标题);
 CREATE INDEX IF NOT EXISTS 媒体_年份 ON 媒体(年份);
 CREATE INDEX IF NOT EXISTS 媒体_类型 ON 媒体(类型);
@@ -177,10 +187,33 @@ CREATE TABLE IF NOT EXISTS 刮削任务 (
     媒体id   INTEGER,
     尝试次数 INTEGER NOT NULL DEFAULT 0,
     说明     TEXT NOT NULL DEFAULT '',
+    -- "需要确认"时把候选列表（JSON）留在任务上：人点一下就能接着刮，
+    -- 不必为了看候选再打一次 TMDB（限流友好，且离线也能回顾上次搜到了什么）。
+    候选     TEXT NOT NULL DEFAULT '',
+    标题     TEXT NOT NULL DEFAULT '',
+    年份     INTEGER,
+    类型     TEXT NOT NULL DEFAULT '',
     更新时间 REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS 刮削任务_状态 ON 刮削任务(状态);
-"""
+""")
+
+#: 建表脚本之后的**增量迁移**（老库不重建、不丢数据；每一步都要能重复执行）
+迁移步骤 = (
+    ("媒体", "唯一键", "ALTER TABLE 媒体 ADD COLUMN 唯一键 TEXT NOT NULL DEFAULT ''"),
+    ("刮削任务", "候选", "ALTER TABLE 刮削任务 ADD COLUMN 候选 TEXT NOT NULL DEFAULT ''"),
+    ("刮削任务", "标题", "ALTER TABLE 刮削任务 ADD COLUMN 标题 TEXT NOT NULL DEFAULT ''"),
+    ("刮削任务", "年份", "ALTER TABLE 刮削任务 ADD COLUMN 年份 INTEGER"),
+    ("刮削任务", "类型", "ALTER TABLE 刮削任务 ADD COLUMN 类型 TEXT NOT NULL DEFAULT ''"),
+)
+
+#: 迁移之后才建的索引（引用了新列，老库要先 ALTER 再建，否则脚本会报错）
+迁移后索引 = (
+    # 部分索引：唯一键为空的（纯本地、还没身份的）条目不参与去重，可以有多条
+    "CREATE UNIQUE INDEX IF NOT EXISTS 媒体_唯一 ON 媒体(来源, 唯一键) WHERE 唯一键 <> ''",
+    "UPDATE 媒体 SET 唯一键='tmdb:'||tmdb_id "
+    "WHERE 唯一键='' AND tmdb_id<>''",
+)
 
 
 #: 从文件名里认清晰度/版本标签（用于"同一部作品的多版本"展示）
@@ -190,6 +223,11 @@ _版本正则 = re.compile(r"(?<![a-zA-Z0-9])(\d{3,4}[pi]|4k|8k)(?![a-zA-Z0-9])"
 def _从文件名猜版本(文件名: str) -> str:
     m = _版本正则.search(文件名)
     return m.group(1).lower() if m else ""
+
+
+def _短哈希(文本: str) -> str:
+    """稳定短哈希（sha1 前 20 位）：只用来当去重身份，不做安全用途。"""
+    return hashlib.sha1(文本.encode("utf-8", "surrogatepass")).hexdigest()[:20]
 
 
 @dataclass
@@ -205,12 +243,14 @@ class 库统计:
     待处理: int = 0
     需要确认: int = 0
     失败: int = 0
+    跳过: int = 0
 
     def 摘要(self) -> str:
         return (f"作品 {self.媒体数}（电影 {self.电影数}｜剧集 {self.剧集数}）"
                 f"｜季 {self.季数}｜集 {self.集数}｜人物 {self.人物数}"
                 f"｜图片 {self.图片数}｜文件 {self.文件数}"
-                f"｜待处理 {self.待处理}｜待确认 {self.需要确认}｜失败 {self.失败}")
+                f"｜待处理 {self.待处理}｜待确认 {self.需要确认}｜失败 {self.失败}"
+                f"｜跳过 {self.跳过}")
 
 
 @dataclass
@@ -249,9 +289,63 @@ class 资料库:
                                  check_same_thread=False)
         self._连接.row_factory = sqlite3.Row
         self._连接.executescript(表结构)
+        self._迁移()
         self._连接.commit()
 
     # ---------------- 基础设施 ----------------
+
+    def _迁移(self) -> None:
+        """把老库补到当前表结构（**加法迁移**：加列/加索引/必要时重建媒体表，不动数据）。"""
+        self._重建媒体表()
+        for 表, 列, 语句 in 迁移步骤:
+            if 列 in self._列名(表):
+                continue
+            self._连接.execute(语句)
+        for 语句 in 迁移后索引:
+            try:
+                self._连接.execute(语句)
+            except sqlite3.IntegrityError:
+                # 老库里已经存在重复的唯一键（历史 bug 留下的），
+                # 这时**不能**让整个资料库打不开：把重复的降级成"没身份"，仍然可用。
+                self._连接.execute(
+                    "UPDATE 媒体 SET 唯一键='' WHERE 唯一键 IN ("
+                    "  SELECT 唯一键 FROM 媒体 WHERE 唯一键<>'' "
+                    "  GROUP BY 来源, 唯一键 HAVING COUNT(*)>1)")
+                self._连接.execute(语句)
+
+    def _重建媒体表(self) -> None:
+        """把老库的媒体表换成"没有 UNIQUE(来源, tmdb_id)"的版本。
+
+        为什么非重建不可：那条约束把**空 tmdb_id 也当成一个值**，于是"第二部没有
+        TMDB 身份的片子"会顶着第一部（真机踩过：本地 NFO 刮了两部，海报墙只剩一张）。
+        新结构用**部分唯一索引**（``唯一键 <> ''`` 才参与）表达同一个意图：
+        既保住"同一部作品不重复"，又允许"多条还没身份的本地条目"各自独立。
+
+        重建要小心两件事（都在这里处理了）：
+        * ``foreign_keys=OFF`` —— 否则 ``DROP TABLE 媒体`` 会顺着外键把子表数据级联删掉；
+        * **id 原样搬**，因为 文件/季/集/图片/分级/标签/媒体人物 都按 媒体id 指过来。
+        """
+        行 = self.一个("SELECT sql FROM sqlite_master WHERE type='table' AND name='媒体'")
+        if 行 is None or "UNIQUE(来源, tmdb_id)" not in str(行["sql"] or ""):
+            return
+        列们 = [str(x["name"]) for x in self.全部("PRAGMA table_info(媒体)")]
+        if "唯一键" not in 列们:                      # 极老的库：先补列再搬
+            self._连接.execute(迁移步骤[0][2])
+            列们.append("唯一键")
+        列文本 = ", ".join(f'"{c}"' for c in 列们)
+        self._连接.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self._连接:
+                self._连接.execute(媒体表.format(名字="媒体_迁移中"))
+                self._连接.execute(
+                    f"INSERT INTO 媒体_迁移中 ({列文本}) SELECT {列文本} FROM 媒体")
+                self._连接.execute("DROP TABLE 媒体")
+                self._连接.execute("ALTER TABLE 媒体_迁移中 RENAME TO 媒体")
+        finally:
+            self._连接.execute("PRAGMA foreign_keys=ON")
+
+    def _列名(self, 表: str) -> set[str]:
+        return {str(行["name"]) for 行 in self.全部(f"PRAGMA table_info({表})")}
 
     def 关闭(self) -> None:
         try:
@@ -269,20 +363,38 @@ class 资料库:
     # ---------------- 写入 ----------------
 
     def 存条目(self, 条目: 媒体条目) -> int:
-        """把一个 :class:`媒体条目` 落库（存在就更新，含季/集/人物/图片/分级/标签）。"""
+        """把一个 :class:`媒体条目` 落库（存在就更新，含季/集/人物/图片/分级/标签）。
+
+        怎么认"这是同一部作品"（**去重身份**，见 :meth:`唯一键`）：
+        先按库里的唯一键找，再按 TMDB id 找，再按文件路径找 —— 这样"本地先入库、
+        后来刮到了 TMDB"会**更新同一行**（不会在海报墙上多出一张重复卡）。
+        """
         现在 = time.time()
-        主键 = 条目.外部ID.get("tmdb") or ""
-        行 = self.一个("SELECT id FROM 媒体 WHERE 来源=? AND tmdb_id=?", (条目.来源, 主键))
+        主键 = (条目.外部ID.get("tmdb") or "").strip()
+        唯一键 = self.唯一键(条目)
+        行 = self._找已有(条目, 主键, 唯一键)
         with self._连接:
             if 行:
                 媒体id = int(行["id"])
+                if 唯一键 and str(行["唯一键"] or "") != 唯一键:
+                    self._连接.execute("UPDATE 媒体 SET 唯一键=? WHERE id=?", (唯一键, 媒体id))
                 self._更新媒体(媒体id, 条目, 现在)
             else:
-                游标 = self._连接.execute(
-                    "INSERT INTO 媒体 (类型, 来源, tmdb_id, 更新时间, 刮削时间) "
-                    "VALUES (?,?,?,?,?)",
-                    (条目.类型.value, 条目.来源, 主键, 现在, 现在))
-                媒体id = int(游标.lastrowid or 0)
+                try:
+                    游标 = self._连接.execute(
+                        "INSERT INTO 媒体 (类型, 来源, tmdb_id, 唯一键, 更新时间, 刮削时间) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (条目.类型.value, 条目.来源, 主键, 唯一键, 现在, 现在))
+                except sqlite3.IntegrityError:
+                    # 撞唯一键（并发/历史数据）→ 改成更新那一行，别让整次刮削失败
+                    撞 = self.一个("SELECT id FROM 媒体 WHERE 来源=? AND 唯一键=?",
+                                 (条目.来源, 唯一键))
+                    if 撞 is None:
+                        raise
+                    游标 = None
+                    媒体id = int(撞["id"])
+                else:
+                    媒体id = int(游标.lastrowid or 0)
                 self._更新媒体(媒体id, 条目, 现在)
             self._写季集(媒体id, 条目)
             self._写人物(媒体id, 条目)
@@ -291,16 +403,64 @@ class 资料库:
             self._写文件(媒体id, 条目)
         return 媒体id
 
+    def _找已有(self, 条目: 媒体条目, 主键: str, 唯一键: str):
+        """按"最可信的身份"依次找已有行：唯一键 → TMDB id → 文件路径。"""
+        if 唯一键:
+            行 = self.一个("SELECT id, 唯一键 FROM 媒体 WHERE 来源=? AND 唯一键=?",
+                         (条目.来源, 唯一键))
+            if 行 is not None:
+                return 行
+        if 主键:
+            行 = self.一个("SELECT id, 唯一键 FROM 媒体 WHERE 来源=? AND tmdb_id=?",
+                         (条目.来源, 主键))
+            if 行 is not None:
+                return 行
+        for 路径 in self._条目文件们(条目):
+            行 = self.一个("SELECT m.id AS id, m.唯一键 AS 唯一键 FROM 文件 f "
+                         "JOIN 媒体 m ON m.id=f.媒体id WHERE f.路径=?", (str(路径),))
+            if 行 is not None:
+                return 行
+        return None
+
+    @staticmethod
+    def _条目文件们(条目: 媒体条目) -> list[Path]:
+        路径们: list[Path] = []
+        if 条目.文件路径 is not None:
+            路径们.append(Path(条目.文件路径))
+        for 额外 in getattr(条目, "额外文件", []) or []:
+            if 额外 is not None:
+                路径们.append(Path(额外))
+        for 季对象 in 条目.季们:
+            for 集对象 in 季对象.集们:
+                if 集对象.文件路径 is not None:
+                    路径们.append(Path(集对象.文件路径))
+        return 路径们
+
+    @classmethod
+    def 唯一键(cls, 条目: 媒体条目) -> str:
+        """这部作品的去重身份（空串 = 没身份，此时**允许重复行**，不会被顶掉）。"""
+        主键 = (条目.外部ID.get("tmdb") or "").strip()
+        if 主键:
+            return f"tmdb:{主键}"
+        文件们 = cls._条目文件们(条目)
+        if 文件们:
+            return "path:" + _短哈希(str(文件们[0]))
+        标题 = 条目.排序用标题()
+        if 标题:
+            return "title:" + _短哈希(f"{条目.类型.value}|{标题}|{条目.年份 or ''}")
+        return ""
+
     def _更新媒体(self, 媒体id: int, 条目: 媒体条目, 现在: float) -> None:
         self._连接.execute(
             """UPDATE 媒体 SET 类型=?, 标题=?, 原名=?, 年份=?, 简介=?, 时长分钟=?,
                评分=?, 评分票数=?, 影评人评分=?, 状态=?, 原始语言=?,
-               imdb_id=?, tvdb_id=?, 海报=?, 背景=?, 标志=?,
+               tmdb_id=?, imdb_id=?, tvdb_id=?, 海报=?, 背景=?, 标志=?,
                总季数=?, 总集数=?, 制片公司=?, 更新时间=?, 刮削时间=?
                WHERE id=?""",
             (条目.类型.value, 条目.标题, 条目.原名, 条目.年份, 条目.简介,
              条目.时长分钟, 条目.评分, 条目.评分票数, 条目.影评人评分, 条目.状态,
-             条目.原始语言, 条目.外部ID.get("imdb", ""), 条目.外部ID.get("tvdb", ""),
+             条目.原始语言, (条目.外部ID.get("tmdb") or "").strip(),
+             条目.外部ID.get("imdb", ""), 条目.外部ID.get("tvdb", ""),
              self._图片相对(条目.海报), self._图片相对(条目.背景),
              self._图片相对(条目.标志), len(条目.季们), 条目.汇总集数(),
              json.dumps(条目.制片公司, ensure_ascii=False), 现在, 现在, 媒体id))
@@ -587,18 +747,44 @@ class 资料库:
     # ---------------- 刮削任务 ----------------
 
     def 记任务(self, 路径: str | Path, 状态: str, 媒体id: Optional[int] = None,
-             说明: str = "") -> None:
+             说明: str = "", 候选: Optional[Sequence[匹配候选]] = None,
+             标题: str = "", 年份: Optional[int] = None,
+             类型: Optional[媒体类型] = None) -> None:
+        """记一条刮削任务（同路径覆盖）。
+
+        ``候选``/``标题``/``年份``/``类型`` 只在"需要确认"时有意义 —— 它们是
+        **人点一下所需的最小上下文**：候选列表（选哪个）+ 我们从文件名猜到的名字
+        （队列里显示什么）。状态变成别的时会一起清掉，免得下次读到过期的候选。
+        """
+        候选文本 = ""
+        if 候选 is not None:
+            候选文本 = json.dumps([c.到字典() for c in 候选], ensure_ascii=False)
+        elif 状态 != "需要确认":
+            候选文本 = ""
         with self._连接:
             self._连接.execute(
-                """INSERT INTO 刮削任务 (路径, 状态, 媒体id, 尝试次数, 说明, 更新时间)
-                   VALUES (?,?,?,0,?,?)
+                """INSERT INTO 刮削任务
+                      (路径, 状态, 媒体id, 尝试次数, 说明, 候选, 标题, 年份, 类型, 更新时间)
+                   VALUES (?,?,?,0,?,?,?,?,?,?)
                    ON CONFLICT(路径) DO UPDATE SET
                      状态=excluded.状态,
                      媒体id=COALESCE(excluded.媒体id, 刮削任务.媒体id),
-                     说明=excluded.说明, 更新时间=excluded.更新时间,
+                     说明=excluded.说明,
+                     候选=CASE WHEN excluded.候选<>'' THEN excluded.候选
+                              WHEN excluded.状态='需要确认' THEN 刮削任务.候选
+                              ELSE '' END,
+                     标题=CASE WHEN excluded.标题<>'' THEN excluded.标题
+                              WHEN excluded.状态='需要确认' THEN 刮削任务.标题
+                              ELSE '' END,
+                     年份=COALESCE(excluded.年份, 刮削任务.年份),
+                     类型=CASE WHEN excluded.类型<>'' THEN excluded.类型
+                              WHEN excluded.状态='需要确认' THEN 刮削任务.类型
+                              ELSE '' END,
+                     更新时间=excluded.更新时间,
                      尝试次数=刮削任务.尝试次数
                         + CASE WHEN excluded.状态='失败' THEN 1 ELSE 0 END""",
-                (str(路径), 状态, 媒体id, 说明, time.time()))
+                (str(路径), 状态, 媒体id, 说明, 候选文本, 标题, 年份,
+                 (类型.value if 类型 is not None else ""), time.time()))
 
     def 取任务(self, 状态: str = "", 条数: int = 200) -> list[sqlite3.Row]:
         if 状态:
@@ -606,6 +792,52 @@ class 资料库:
                 "SELECT * FROM 刮削任务 WHERE 状态=? ORDER BY 更新时间 DESC LIMIT ?",
                 (状态, 条数))
         return self.全部("SELECT * FROM 刮削任务 ORDER BY 更新时间 DESC LIMIT ?", (条数,))
+
+    def 删任务(self, 路径: str | Path) -> int:
+        """把一条任务从队列里抹掉（返回删掉几行；0 表示本来就没有）。"""
+        with self._连接:
+            游标 = self._连接.execute("DELETE FROM 刮削任务 WHERE 路径=?", (str(路径),))
+        return int(游标.rowcount or 0)
+
+    def 清任务(self, 状态: str = "") -> int:
+        with self._连接:
+            游标 = (self._连接.execute("DELETE FROM 刮削任务 WHERE 状态=?", (状态,))
+                  if 状态 else self._连接.execute("DELETE FROM 刮削任务"))
+        return int(游标.rowcount or 0)
+
+    def 待确认(self, 条数: int = 500) -> list[待确认项]:
+        """"需要确认"队列（界面直接拿来显示；JSON 候选在这里解析好）。"""
+        return [self._待确认项(行) for 行 in self.取任务("需要确认", 条数)]
+
+    def 待确认数(self) -> int:
+        return int((self.一个("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='需要确认'") or [0])[0])
+
+    @staticmethod
+    def _待确认项(行: sqlite3.Row) -> 待确认项:
+        原始 = str(行["候选"] or "") if "候选" in 行.keys() else ""
+        候选们: list[匹配候选] = []
+        if 原始:
+            try:
+                数据 = json.loads(原始)
+            except ValueError:
+                数据 = None
+            if isinstance(数据, list):
+                候选们 = [匹配候选.从字典(x) for x in 数据]
+        try:
+            类型 = 媒体类型(str(行["类型"] or "unknown")) if "类型" in 行.keys() \
+                else 媒体类型.未知
+        except ValueError:
+            类型 = 媒体类型.未知
+        年份 = 行["年份"] if "年份" in 行.keys() else None
+        return 待确认项(
+            路径=str(行["路径"] or ""),
+            标题=str(行["标题"] or "") if "标题" in 行.keys() else "",
+            年份=int(年份) if 年份 not in (None, "") else None,
+            类型=类型,
+            说明=str(行["说明"] or ""),
+            候选们=候选们,
+            尝试次数=int(行["尝试次数"] or 0),
+            更新时间=float(行["更新时间"] or 0.0))
 
     # ---------------- 统计 ----------------
 
@@ -624,4 +856,5 @@ class 资料库:
             文件数=数("SELECT COUNT(*) FROM 文件"),
             待处理=数("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='待处理'"),
             需要确认=数("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='需要确认'"),
-            失败=数("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='失败'"))
+            失败=数("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='失败'"),
+            跳过=数("SELECT COUNT(*) FROM 刮削任务 WHERE 状态='跳过'"))

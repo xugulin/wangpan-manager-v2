@@ -52,6 +52,8 @@ class 主窗口(QMainWindow):
         self._帧序号 = -1
         self._拖动中 = False
         self._日志行: list[str] = []
+        #: 刮削批次跑完如果留下"待确认"，自动把队列摆到人面前（测试可关掉）
+        self.自动开队列 = True
 
         self.视频 = 视频控件()
         self.视频.设置弹幕控制器(self.弹幕)      # 弹幕画在画面之上（视频控件负责绘制）
@@ -178,6 +180,7 @@ class 主窗口(QMainWindow):
             self.海报墙.要播放.connect(self._播放库里的文件)
             self.海报墙.要刮削.connect(self._刮削路径)
             self.海报墙.要手动匹配.connect(self._开手动匹配)
+            self.海报墙.要处理待确认.connect(self._开待确认队列)
             self.标签.addTab(self.海报墙, "🎞 媒体库")
         except Exception as 错:  # noqa: BLE001
             self.资料库 = None
@@ -521,11 +524,13 @@ class 主窗口(QMainWindow):
         self.状态.showMessage(f"🗨 {结果.说明 or '没找到弹幕'}")
 
     def _刮削路径(self, 路径: str, 强制标识: str = "",
-               强制类型=None) -> None:
+               强制类型=None, 完成后=None) -> None:
         """刮一个目录/文件：在**后台线程**里跑，界面只显示进度（别卡住 UI）。
 
         为什么用线程 + 进度框：刮削要联网、要下图，几秒钟到几分钟都有可能；
         放在界面线程里会整个卡死（我们字幕/截图都踩过"界面线程里干重活"的坑）。
+
+        :param 完成后: 跑完之后再做什么（待确认队列用它"接着开下一条"）。
         """
         from PySide6.QtCore import QThread
         from PySide6.QtWidgets import QMessageBox, QProgressDialog
@@ -570,6 +575,7 @@ class 主窗口(QMainWindow):
                         结果盒["结果"] = 服务.刮路径(路径, 强制标识, 强制类型)
                     else:
                         结果盒["结果"] = 服务.续跑()
+                    结果盒["待确认"] = 库.待确认数()
                     结果盒["统计"] = 库.统计().摘要()
                     服务.关闭()
                     库.关闭()
@@ -591,11 +597,19 @@ class 主窗口(QMainWindow):
             if self.海报墙 is not None:
                 self.海报墙.刷新()
             结果 = 结果盒.get("结果")
+            待确认数 = int(结果盒.get("待确认") or 0)
             self.状态.showMessage("🎞 刮削完成：" + (结果.摘要() if 结果 else
                                               str(结果盒.get("错误") or "无结果"))
-                             + f"｜{结果盒.get('统计', '')}")
+                             + f"｜{结果盒.get('统计', '')}"
+                             + (f"｜⚠ {待确认数} 条待确认" if 待确认数 else ""))
+            if 完成后 is not None:
+                完成后()
+            elif 待确认数 and getattr(self, "自动开队列", True):
+                # 有拿不准的就直接把队列摆到人面前（不然"待确认"永远躺在库里没人看）
+                self._开待确认队列()
         线程.finished.connect(收尾)
         线程.start()
+
 
     # ---------------- 弹幕设置（持久化到 数据/弹幕设置.json）----------------
 
@@ -702,6 +716,51 @@ class 主窗口(QMainWindow):
             return
         self._写日志(f"[刮削] 手动指定 {选择.可读()}")
         self._刮削路径(str(文件), 强制标识=选择.标识, 强制类型=选择.类型)
+
+    # ---------------- 待确认队列（自动匹配拿不准的条目）----------------
+
+    def _开待确认队列(self, 起始行: int = 0) -> None:
+        """打开待确认队列；采纳后**接着开**，直到队列清空或用户关窗。
+
+        为什么采纳完要重开一次：队列的正确用法是"连点"——看候选、点采纳、
+        下一条。若每次都让用户自己再点一次工具条，清 20 条要点 40 次。
+        """
+        if getattr(self, "资料库", None) is None:
+            return
+        from ..scrape.服务 import 刮削服务, 刮削设置
+        from .待确认 import 待确认对话框
+        服务 = 刮削服务(self.资料库, self._建TMDB客户端(), self.图片缓存, 刮削设置())
+        try:
+            框 = 待确认对话框(self.资料库, 服务, self, 起始行)
+            if 框.条数() == 0 and not self.资料库.待确认():
+                self.状态.showMessage("✅ 没有待确认的条目")
+                return
+            框.exec()
+            决定 = 框.取决定()
+        finally:
+            服务.关闭()
+        if 决定 is None:
+            self.状态.showMessage("✅ 待确认队列：稍后再处理")
+            return
+        if 决定.动作 == "采纳":
+            self._刮削路径(决定.路径, 强制标识=决定.标识, 强制类型=决定.类型,
+                        完成后=lambda: self._开待确认队列(决定.行号))
+        elif 决定.动作 == "搜索":
+            self._搜索并刮(决定)
+
+    def _搜索并刮(self, 决定) -> None:
+        """从队列里点「换个名字再搜」：打开手动匹配，选定后按这个 id 刮。"""
+        from .手动匹配 import 手动匹配对话框
+        对话 = 手动匹配对话框(self._建TMDB客户端(), 决定.标题 or "",
+                        决定.年份, 决定.类型 or 媒体类型.电影, self)
+        if not 对话.exec():
+            return
+        选择 = 对话.取选择()
+        if 选择 is None or not 选择.标识:
+            return
+        self._刮削路径(决定.路径, 强制标识=选择.标识, 强制类型=选择.类型,
+                    完成后=lambda: self._开待确认队列(决定.行号))
+
 
     def _开手动资料(self, 媒体id: int) -> None:
         """手动填写/修改资料（**不需要网络**）。"""

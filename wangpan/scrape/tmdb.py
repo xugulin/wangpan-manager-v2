@@ -101,6 +101,10 @@ class TMDB配置:
     超时秒: float = 20.0
     缓存目录: Optional[Path] = None
     缓存TTL秒: float = 7 * 86400     # 默认 7 天；0 = 不用缓存；硬上限 180 天
+    #: 接口基地址（空 = 官方 https://api.themoviedb.org/3）。
+    #: 只在"真机验证 / 自建代理"时填：指向 tests/假TMDB服务.py 的环回地址，
+    #: 这样整条链路（urllib、鉴权头、JSON、图片基地址）都能离线真跑一遍。
+    接口基地址: str = ""
 
     @classmethod
     def 从环境与配置(cls, 配置路径: Optional[Path] = None) -> "TMDB配置":
@@ -114,24 +118,49 @@ class TMDB配置:
         数据 = _读配置文件(配置路径)
         节点 = 数据.get("tmdb") if isinstance(数据.get("tmdb"), dict) else {}
         配置 = cls(
-            token=str(节点.get("token") or "").strip(),
-            api_key=str(节点.get("apiKey") or 节点.get("api_key") or "").strip(),
+            token=_清理密钥(节点.get("token")),
+            api_key=_清理密钥(节点.get("apiKey") or 节点.get("api_key")),
             language=str(节点.get("language") or "zh-CN").strip() or "zh-CN",
             image_language=str(节点.get("imageLanguage") or 节点.get("image_language")
                                or "zh").strip() or "zh",
             超时秒=float(节点.get("timeout") or 20.0),
         )
+        for 键 in ("apiBase", "api_base", "接口基地址"):
+            if 节点.get(键):
+                配置.接口基地址 = str(节点[键]).strip()
+                break
         if 节点.get("cacheDir"):
             配置.缓存目录 = Path(str(节点["cacheDir"])).expanduser()
         if 节点.get("cacheTtlSeconds") is not None:
             配置.缓存TTL秒 = float(节点["cacheTtlSeconds"])
         elif 节点.get("缓存TTL秒") is not None:
             配置.缓存TTL秒 = float(节点["缓存TTL秒"])
-        if (值 := os.environ.get("V2_TMDB_TOKEN", "").strip()):
+        if (值 := _清理密钥(os.environ.get("V2_TMDB_TOKEN"))):
             配置.token = 值
-        if (值 := os.environ.get("V2_TMDB_API_KEY", "").strip()):
+        if (值 := _清理密钥(os.environ.get("V2_TMDB_API_KEY"))):
             配置.api_key = 值
+        if (值 := str(os.environ.get("V2_TMDB_API_BASE") or "").strip()):
+            配置.接口基地址 = 值         # 指向自建代理 / 环回假服务（真机验证用）
         return 配置
+
+    def 密钥问题(self) -> str:
+        """凭据能不能真的放进 HTTP 头里？返回""=没问题，否则是一句人话的原因。
+
+        为什么专门查这个：HTTP 头只能是 latin-1，而用户从网页上复制 token 时
+        很容易带上**中文引号、全角空格、零宽字符**。不查的话底层会抛出
+        ``'latin-1' codec can't encode characters in position 7-10`` ——
+        没人看得懂这句话，也没人猜得到是"复制时多带了一个字符"。
+        """
+        for 名字, 值 in (("token", self.token), ("apiKey", self.api_key)):
+            if not 值:
+                continue
+            try:
+                值.encode("latin-1")
+            except UnicodeEncodeError:
+                坏的 = "".join(sorted({c for c in 值 if ord(c) > 255}))
+                return (f"{名字} 里有非 ASCII 字符（{坏的!r}）—— "
+                        "多半是复制时带上了中文引号/全角空格；请重新复制粘贴")
+        return ""
 
     def 鉴权方式(self) -> str:
         """给界面/日志看的：只说"用哪种鉴权"，**不回显密钥**。"""
@@ -152,6 +181,20 @@ def _读配置文件(配置路径: Optional[Path]) -> dict:
     except (OSError, ValueError):
         return {}
     return 数据 if isinstance(数据, dict) else {}
+
+
+#: 复制粘贴密钥时最容易混进来的字符：各种空白 + 零宽 + 中文引号 + 常见包裹符号
+_密钥杂字符 = ("\u3000", "\u200b", "\u200c", "\u200d", "\ufeff", "\u00a0",
+           "\u2018", "\u2019", "\u201c", "\u201d", "“", "”", "‘", "’", "'", '"',
+           "＜", "＞", "<", ">")
+
+
+def _清理密钥(原文) -> str:
+    """把密钥里"复制时带进来的杂质"去掉（空白、零宽字符、包裹用的引号/尖括号）。"""
+    文本 = str(原文 or "")
+    for 杂 in _密钥杂字符:
+        文本 = 文本.replace(杂, "")
+    return 文本.strip()
 
 
 class 请求失败(Exception):
@@ -195,6 +238,16 @@ class TMDB客户端:
     def 可用(self) -> bool:
         """有没有配鉴权（没配就别去请求，白挨 401）。"""
         return self.配置.可用()
+
+    def _基地址(self) -> str:
+        """接口基地址（默认官方 v3；``配置.接口基地址`` 可指到代理/环回假服务上）。
+
+        为什么要有这个口子：真机验证时用 ``tests/假TMDB服务.py`` 在环回口上顶替网络，
+        走的还是**真的 urllib + 真的 HTTP + 真的鉴权头**，而不是"注入一个假对象"
+        （那样 JSON 解析、状态码、图片基地址这些环节全被绕过去了）。
+        """
+        自定义 = str(getattr(self.配置, "接口基地址", "") or "").strip()
+        return (自定义 or 接口基地址).rstrip("/")
 
     def 配置摘要(self) -> dict:
         """给界面/日志用的一句话配置说明（**密钥只报"有没有"**）。"""
@@ -397,11 +450,19 @@ class TMDB客户端:
     # ---------------- 缓存 ----------------
 
     def _缓存路径(self, 种类: str, 语言: str, 键: str) -> Path:
-        """``缓存目录/种类/语言/键.json``（官方量纲：按类型与语言分层，别互相覆盖）。"""
+        """``缓存目录/种类/语言/键.json``（官方量纲：按类型与语言分层，别互相覆盖）。
+
+        缓存**按接口基地址分区**：同一份缓存目录可能先后被"官方 API / 自建代理 /
+        离线的环回假服务"用过（真机验证就是这么跑的）。不分区的话，验证时缓存下来的
+        假数据会被当成 TMDB 的真数据喂给海报墙 —— 这种错很难看出来。
+        """
         基 = Path(self.配置.缓存目录) if self.配置.缓存目录 else 默认缓存目录()
         安全 = re.sub(r"[^0-9A-Za-z._\-]", "_", str(键))[:80] or "空"
         语言层 = re.sub(r"[^0-9A-Za-z._\-]", "_", str(语言 or "通用")) or "通用"
-        return 基 / re.sub(r"[^0-9A-Za-z._\-]", "_", 种类) / 语言层 / f"{安全}.json"
+        端点层 = "官方" if self._基地址().rstrip("/") == 接口基地址 else \
+            "端点_" + hashlib.sha1(self._基地址().encode("utf-8")).hexdigest()[:10]
+        return (基 / 端点层 / re.sub(r"[^0-9A-Za-z._\-]", "_", 种类) / 语言层
+                / f"{安全}.json")
 
     def _读缓存(self, 路径: Path) -> Optional[dict]:
         if self.配置.缓存TTL秒 <= 0:
@@ -486,13 +547,16 @@ class TMDB客户端:
 
     def _调用(self, 路径: str, 参数: dict) -> dict:
         """发一次请求（429 退避重试），返回 JSON。异常里**不会**出现 token/api_key。"""
+        if (问题 := self.配置.密钥问题()):
+            # 别让 latin-1 的编码错误冒到用户面前（那句话没人看得懂，见 密钥问题()）
+            raise 请求失败(0, f"TMDB 凭据有问题（{路径}）：{问题}")
         全参数 = {k: v for k, v in (参数 or {}).items() if v is not None}
         头 = {"Accept": "application/json", "User-Agent": "WangPanV2/2.0"}
         if self.配置.token:
             头["Authorization"] = f"Bearer {self.配置.token}"
         elif self.配置.api_key:
             全参数["api_key"] = self.配置.api_key
-        地址 = 接口基地址 + 路径
+        地址 = self._基地址() + 路径
         for 次 in range(最多重试 + 1):
             try:
                 return self._请求("GET", 地址, 全参数, 头)
