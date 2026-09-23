@@ -14,10 +14,18 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from tests.公用 import 项目根, 临时目录
+
+#: Linux 的启动器/安装器是 shell 脚本，只能在有 POSIX shell 的地方跑。
+#: Windows 上的入口是 启动.bat / 安装快捷方式.ps1（那部分测试在哪个平台都能跑，
+#: 只读文件查编码与关键内容）。CI 在**真 Windows** 上跑，所以这里必须分开，
+#: 不然 Windows 上会因为"没有 sh / 路径是 /d/a/…"而假失败。
+有POSIX外壳 = os.name != "nt" and shutil.which("sh") is not None
+原因 = "这是 Linux 的 shell 启动器/安装器；Windows 用 启动.bat + 安装快捷方式.ps1"
 
 启动脚本 = 项目根 / "一键启动_网盘管理_V2.sh"
 安装脚本 = 项目根 / "工具" / "安装快捷方式.sh"
@@ -25,6 +33,7 @@ from tests.公用 import 项目根, 临时目录
 图标 = 项目根 / "网盘管理_V2_图标.png"
 
 
+@unittest.skipUnless(有POSIX外壳, 原因)
 class 启动器测试(unittest.TestCase):
     def test_一键启动脚本存在且可执行(self):
         self.assertTrue(启动脚本.is_file(), "缺少一键启动脚本")
@@ -77,8 +86,9 @@ class 图标测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not 图标.is_file():
-            subprocess.run([str(项目根 / "运行环境" / "venv" / "bin" / "python"),
-                        str(图标脚本)], cwd=str(项目根), timeout=180,
+            # 用当前解释器（Linux 是 venv/bin/python，Windows 是 Scripts\python.exe，
+            # 写死 bin/python 会在 Windows 上找不到）
+            subprocess.run([sys.executable, str(图标脚本)], cwd=str(项目根), timeout=180,
                        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
 
     def test_生成的是能解码的真图(self):
@@ -117,6 +127,7 @@ class 图标测试(unittest.TestCase):
                 self.assertEqual(f.read(4)[:4], b"\x00\x00\x01\x00", "ICO 文件头不对")
 
 
+@unittest.skipUnless(有POSIX外壳, 原因)
 class 安装脚本测试(unittest.TestCase):
     """真跑一遍安装脚本（HOME 指到临时目录里，绝不碰用户的桌面）。"""
 
