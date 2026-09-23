@@ -72,10 +72,13 @@ find_desktop_dir() {
       fi
     fi
   fi
+  # 系统配置把桌面指向家目录本身时（xdg-user-dirs 有些发行版就这么写），
+  # **不能**把图标撒在家目录里：真正被显示出来的通常是 ~/Desktop（本机 COSMIC 就是这样，
+  # 实测桌面上显示的是 ~/Desktop 的内容）。所以这里优先 ~/Desktop、~/桌面。
   for dir in "$HOME/Desktop" "$HOME/桌面"; do
     if [ -d "$dir" ]; then printf '%s\n' "$dir"; return; fi
   done
-  printf '%s\n' "$HOME"        # 真找不到就放家目录（KDE 把 Desktop 设成 $HOME 时就是这样）
+  printf '%s\n' "$HOME"        # 两个都没有才退回家目录
 }
 
 DESKTOP_DIR=$(find_desktop_dir)
@@ -95,6 +98,13 @@ if [ "$DO_SHOW" -eq 1 ]; then
     echo "图标文件   ：$ICON_PNG（❌ 缺失，跑 工具/生成图标.py）"
   fi
   echo "桌面目录   ：$DESKTOP_DIR"
+  if [ -f "$DESKTOP_LINK" ]; then
+    if [ -x "$DESKTOP_LINK" ]; then
+      echo "可信/可执行：可执行位 ✔（桌面双击即可启动）"
+    else
+      echo "可信/可执行：❌ 缺可执行位（重跑一次安装即可修好）"
+    fi
+  fi
   for pair in "菜单项:$DESKTOP_FILE" "桌面图标:$DESKTOP_LINK" \
               "图标主题:$ICONS_DIR/256x256/apps/$APP_ID.png"; do
     label=${pair%%:*}
@@ -144,6 +154,17 @@ if [ "$fail" -ne 0 ]; then exit 1; fi
 mkdir -p -- "$APPS_DIR" || exit 1
 
 # ---------------- 写 .desktop ----------------
+#: 让桌面把 .desktop 当"可信启动器"：GNOME/COSMIC 系不看这个标记的话，
+#: 双击会弹一次"不受信任的应用启动器"，要用户手动允许 —— 用户要的是**双击就跑**。
+mark_trusted() {
+  file=$1
+  chmod 755 -- "$file" 2>/dev/null || true
+  if command -v gio >/dev/null 2>&1; then
+    gio set -t string "$file" metadata::trusted true >/dev/null 2>&1 || true
+    gio set -t string "$file" metadata::xdg::trusted true >/dev/null 2>&1 || true
+  fi
+}
+
 write_entry() {
   target=$1
   {
@@ -165,7 +186,7 @@ write_entry() {
     echo 'MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;'
     echo 'Keywords=网盘;播放器;弹幕;海报墙;刮削;wangpan;video;danmaku;'
   } > "$target" || return 1
-  chmod 755 -- "$target" 2>/dev/null || true
+  mark_trusted "$target"
 }
 
 write_entry "$DESKTOP_FILE" || { echo "[X] 写不了 $DESKTOP_FILE" >&2; exit 1; }
@@ -173,8 +194,8 @@ echo "✓ 菜单项：$DESKTOP_FILE"
 
 if [ "$WANT_DESKTOP" -eq 1 ]; then
   if [ -d "$DESKTOP_DIR" ] && write_entry "$DESKTOP_LINK"; then
-    # 桌面（COSMIC/GNOME）把 .desktop 当"可信启动器"需要可执行位，write_entry 里已 chmod
-    echo "✓ 桌面图标：$DESKTOP_LINK"
+    # 可执行位 + metadata::trusted 都在 write_entry→mark_trusted 里做掉了
+    echo "✓ 桌面图标：$DESKTOP_LINK（已设为可执行 + 标记可信，双击即启动）"
   else
     echo "[!] 桌面目录写不进去（跳过）：$DESKTOP_DIR" >&2
   fi

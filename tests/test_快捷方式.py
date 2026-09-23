@@ -100,21 +100,82 @@ class 图标测试(unittest.TestCase):
         self.assertFalse(图.isNull(), "图标不是能解码的图片")
         self.assertEqual((图.width(), 图.height()), (256, 256))
 
-    def test_图标不是一片空白(self):
-        """画歪了/画丢了也要能发现：至少要有明显不同的颜色块（底、三角、方块）。"""
+    def _取样(self, 路径, 步长=3):
         from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
-        图 = QImage(str(图标)).convertToFormat(QImage.Format.Format_RGB32)
-        颜色 = {}
-        for x in range(0, 图.width(), 3):
-            for y in range(0, 图.height(), 3):
-                颜色[图.pixel(x, y) & 0xFFFFFF] = 颜色.get(图.pixel(x, y) & 0xFFFFFF, 0) + 1
-        self.assertGreater(len(颜色), 200, "颜色太少，不像一张画好的图")
-        白 = sum(n for c, n in 颜色.items() if c > 0xE0E0E0)
-        蓝 = sum(n for c, n in 颜色.items() if (c & 0xFF) > (c >> 16))
-        self.assertGreater(白, 200, "白色播放三角不见了？")
-        self.assertGreater(蓝, 2000, "底色不对？")
+        图 = QImage(str(路径)).convertToFormat(QImage.Format.Format_RGB32)
+        self.assertFalse(图.isNull(), f"解不开这张图：{路径}")
+        点们 = [(图.pixel(x, y) & 0xFFFFFF)
+               for x in range(0, 图.width(), 步长)
+               for y in range(0, 图.height(), 步长)]
+        return 图, 点们
+
+    @staticmethod
+    def _亮度(颜色: int) -> float:
+        r, g, b = (颜色 >> 16) & 0xFF, (颜色 >> 8) & 0xFF, 颜色 & 0xFF
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+    def test_风格是简约清新_浅底加青绿点缀(self):
+        """用户明确要求"简约清新"：**底色要浅、点缀要青绿**。
+
+        这条测试是防回退的：上一版是深蓝底大色块，被嫌丑。
+        """
+        图, 点们 = self._取样(图标)
+        浅色 = sum(1 for c in 点们 if self._亮度(c) >= 0.82)
+        self.assertGreater(浅色 / len(点们), 0.55,
+                           f"底色不够浅（浅色占比 {浅色 / len(点们):.2f}），不像简约清新")
+        青绿 = sum(1 for c in 点们
+                 if (c >> 8 & 0xFF) > (c >> 16 & 0xFF) + 25
+                 and (c >> 8 & 0xFF) > (c & 0xFF) - 10
+                 and self._亮度(c) > 0.25)
+        self.assertGreater(青绿, 400, "看不出青绿点缀（圆环/播放三角）")
+        self.assertEqual(len({c for c in 点们}), len(set(点们)))
+
+    def test_圆角底_四角是透明的(self):
+        # 注意：这里**不能**走 _取样（它转成 RGB32 会把 alpha 抹掉）
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        图 = QImage(str(图标))
+        for x, y in ((2, 2), (图.width() - 3, 2), (2, 图.height() - 3),
+                    (图.width() - 3, 图.height() - 3)):
+            点 = 图.pixel(x, y)
+            self.assertEqual(点 & 0xFF000000, 0, f"({x},{y}) 不是透明的：圆角没画出来？")
+
+    def test_十六像素会简化_还认得出是播放器(self):
+        """16 px 下画环只会糊成一团：那个尺寸只留三角，但必须还是"能认出的图形"。"""
+        小 = 项目根 / "资源" / "图标" / "hicolor" / "16x16" / "apps" / "网盘管理_V2.png"
+        self.assertTrue(小.is_file(), "缺少 16×16 图标")
+        图, 点们 = self._取样(小, 步长=1)
+        颜色 = {c for c in 点们 if self._亮度(c) < 0.9}      # 去掉浅底
+        self.assertGreater(len(颜色), 3, "16 px 下图形太单薄（只有一两种颜色）")
+        青绿 = sum(1 for c in 点们
+                 if (c >> 8 & 0xFF) > (c >> 16 & 0xFF) + 25 and self._亮度(c) < 0.8)
+        self.assertGreater(青绿, 12, "16 px 下看不到那个青绿三角")
+
+    def test_三款风格都画得出来且各有特征(self):
+        """生成器要能独立调用（换风格不用改代码）：简约浅底、深色深底、极简透明。"""
+        import importlib.util
+        规格 = importlib.util.spec_from_file_location("v2生成图标", 图标脚本)
+        模块 = importlib.util.module_from_spec(规格)
+        规格.loader.exec_module(模块)
+        应用 = __import__("PySide6.QtWidgets", fromlist=["QApplication"]).QApplication
+        应用.instance() or 应用([])
+        for 样式 in 模块.样式们:
+            图 = 模块.画图标(64, 样式)
+            self.assertFalse(图.isNull(), f"{样式} 画不出来")
+            点们 = [图.pixel(x, y) & 0xFFFFFF
+                   for x in range(0, 64, 2) for y in range(0, 64, 2)]
+            亮 = sum(1 for c in 点们 if self._亮度(c) >= 0.82) / len(点们)
+            if 样式 == "简约":
+                self.assertGreater(亮, 0.5, "简约风应当是浅底")
+            elif 样式 == "深色":
+                self.assertLess(亮, 0.25, "深色风应当是深底")
+            else:                                   # 极简：透明底 + 青绿三角
+                self.assertLess(图.pixel(2, 2) & 0xFF000000, 1, "极简风应当没有底")
+        with self.assertRaises(ValueError):
+            模块.画图标(64, "花里胡哨")
 
     def test_图标主题与ICO都齐全(self):
         根 = 项目根 / "资源" / "图标"
@@ -166,6 +227,7 @@ class 安装脚本测试(unittest.TestCase):
         路径行 = next(x for x in 文本.splitlines() if x.startswith("Path="))
         self.assertEqual(Path(路径行.split("=", 1)[1]), 项目根)
         self.assertTrue(os.access(桌面项, os.X_OK), ".desktop 要可执行（桌面才会当启动器）")
+        self.assertIn("一键启动_网盘管理_V2.desktop", str(桌面项))
         for 尺寸 in (16, 256):
             装好 = self.数据 / "icons" / "hicolor" / f"{尺寸}x{尺寸}" / "apps" / "网盘管理_V2.png"
             self.assertTrue(装好.is_file(), f"图标主题缺 {尺寸}")
@@ -176,6 +238,22 @@ class 安装脚本测试(unittest.TestCase):
         self.assertEqual(第一次.returncode, 0)
         self.assertEqual(第二次.returncode, 0, f"重复安装失败了：{第二次.stderr}")
         self.assertTrue((self.数据 / "applications" / "网盘管理_V2.desktop").is_file())
+
+    def test_桌面图标带可执行位与信任标记(self):
+        """双击要能直接跑：GNOME/COSMIC 系看可执行位 + metadata::trusted，
+        少了任何一样都会先弹"不受信任的启动器"让用户手动允许。"""
+        self._跑()
+        桌面项 = self.桌面 / "一键启动_网盘管理_V2.desktop"
+        self.assertTrue(os.access(桌面项, os.X_OK), "缺可执行位")
+        if shutil.which("gio") is None:
+            self.skipTest("没有 gio，跳过信任标记检查")
+        子 = subprocess.run(["gio", "info", "-a", "metadata::*", str(桌面项)],
+                        capture_output=True, text=True, timeout=60,
+                        env={**self.环境, "XDG_RUNTIME_DIR": str(Path(self.临时.name) / "run")})
+        输出 = 子.stdout + 子.stderr
+        if "metadata::" not in 输出:
+            self.skipTest("这个文件系统不支持 GIO 元数据（不影响双击启动）")
+        self.assertIn("metadata::trusted: true", 输出, f"没标记可信：{输出[-300:]}")
 
     def test_卸载只删自己装的那几个(self):
         别人的 = self.桌面 / "别人的快捷方式.desktop"
