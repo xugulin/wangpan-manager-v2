@@ -52,7 +52,10 @@ class 含糊TMDB:
                        类型=媒体类型.电影, 热度=117, 海报远端="/c.jpg")]
 
     def 搜剧集(self, 标题: str, 年份=None) -> list[匹配候选]:
-        return self.搜电影(标题, 年份)
+        # 剧集候选的类型必须是"剧集"：采纳时按它决定走 /tv 还是 /movie
+        return [匹配候选(来源标识=c.来源标识, 标题=c.标题, 原名=c.原名, 年份=c.年份,
+                       类型=媒体类型.剧集, 热度=c.热度, 海报远端=c.海报远端)
+                for c in self.搜电影(标题, 年份)]
 
     def 取电影(self, id: str) -> 媒体条目:
         self.取的详情.append(str(id))
@@ -325,6 +328,32 @@ class 服务队列测试(unittest.TestCase):
         # 续跑只挑"待处理/失败"，跳过的不会被自动拾回来
         self.assertEqual(self.服务.续跑().需要确认, 0)
         self.assertEqual(self.库.统计().跳过, 1)
+
+    def test_剧集候选采纳后把集文件挂上(self):
+        """番剧最常见：一集一个文件。选中的是**剧集**候选时，要走 /tv 并且把集挂上。"""
+        剧目录 = self.根 / "媒体" / "含糊剧 (2024)" / "Season 01"
+        剧目录.mkdir(parents=True, exist_ok=True)
+        集文件 = 剧目录 / "含糊剧 S01E01.mkv"
+        集文件.write_bytes(b"x" * (2 * 1024 * 1024))
+        服务 = 刮削服务(self.库, self.客户端, None,
+                    刮削设置(最小文件字节=1024, 下载图片=False, 抓季集详情=False))
+        self.addCleanup(服务.关闭)
+        结果 = 服务.刮路径(集文件)
+        self.assertEqual(结果.需要确认, 1, f"应该拿不准：{结果.摘要()}")
+        项 = self.库.待确认()[0]
+        self.assertEqual(项.类型, 媒体类型.剧集)
+        self.assertTrue(all(c.类型 is 媒体类型.剧集 for c in 项.候选们),
+                        "剧集条目搜出来的候选也该是剧集")
+        结果2 = 服务.采纳候选(项.路径, 项.候选们[0])
+        self.assertEqual(结果2.失败, 0, f"采纳不该失败：{结果2.错误们}")
+        行们 = self.库.列表(查询条件())
+        self.assertEqual(len(行们), 1)
+        条目 = self.库.取媒体(int(行们[0]["id"]))
+        self.assertEqual(条目.类型, 媒体类型.剧集)
+        self.assertEqual(条目.外部ID.get("tmdb"), "101")
+        挂了 = [c for 季对象 in 条目.季们 for c in 季对象.集们 if c.文件路径]
+        self.assertTrue(挂了, "集上要挂到本地文件")
+        self.assertEqual(Path(挂了[0].文件路径).name, 集文件.name)
 
     def test_重搜会刷新候选并留在队列(self):
         服务 = 刮削服务(self.库, 含糊TMDB(), None,
