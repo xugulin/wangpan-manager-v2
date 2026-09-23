@@ -105,7 +105,9 @@ class 主窗口(QMainWindow):
         self.弹幕设置按钮.clicked.connect(self._开弹幕设置)
         行.addWidget(self.弹幕设置按钮)
         self.找弹幕按钮 = QPushButton("⬇ 找弹幕")
-        self.找弹幕按钮.setToolTip("按文件名到弹弹play 找这一集的弹幕（需要 AppId；见 数据/弹幕源.json）")
+        self.找弹幕按钮.setToolTip(
+            "按文件名找这一集的弹幕：Animeko 公益源（零凭据）→ 弹弹play → 本地同名文件；"
+            "记住的匹配下次打开会自动装")
         self.找弹幕按钮.clicked.connect(self._装载弹幕)
         行.addWidget(self.找弹幕按钮)
         self.字幕按钮 = QPushButton("💬 字幕")
@@ -181,6 +183,7 @@ class 主窗口(QMainWindow):
             self.海报墙.要刮削.connect(self._刮削路径)
             self.海报墙.要手动匹配.connect(self._开手动匹配)
             self.海报墙.要处理待确认.connect(self._开待确认队列)
+            self.海报墙.状态变化.connect(self.提示)     # 本页的"一句话"要真的显示出来
             self.标签.addTab(self.海报墙, "🎞 媒体库")
         except Exception as 错:  # noqa: BLE001
             self.资料库 = None
@@ -189,7 +192,13 @@ class 主窗口(QMainWindow):
         self.setCentralWidget(self.标签)
 
         self.状态 = self.statusBar()
-        self.状态.showMessage("就绪：打开一个视频文件即可播放（画面由本程序自己绘制）")
+        # ⚠️ 播放统计是**每 16ms 刷一次**的常驻信息，必须放 permanent 部件；
+        # 之前它走 showMessage，把"刮削完成/待确认/已装弹幕"这些提示在 16 毫秒内
+        # 全盖掉了（真机点「待确认」时看到的还是播放统计，压根没看到提示）。
+        from PySide6.QtWidgets import QLabel as _QLabel
+        self.统计标签 = _QLabel("")
+        self.状态.addPermanentWidget(self.统计标签)
+        self.提示("就绪：打开一个视频文件即可播放（画面由本程序自己绘制）")
         self._定时器 = QTimer(self)
         self._定时器.setInterval(16)
         self._定时器.timeout.connect(self._刷新)
@@ -205,7 +214,7 @@ class 主窗口(QMainWindow):
         try:
             self.引擎.打开(str(路径))
         except Exception as 错:  # noqa: BLE001
-            self.状态.showMessage(f"❌ 打不开：{错}")
+            self.提示(f"❌ 打不开：{错}")
             return False
         self.视频.清空()
         self._预览缓存 = {}
@@ -220,7 +229,7 @@ class 主窗口(QMainWindow):
         if self._字幕们:
             self._字幕序号 = 0
             self.视频.设置字幕(self._字幕们[0], True)
-            self.状态.showMessage(f"💬 已加载字幕：{self._字幕们[0].名字}")
+            self.提示(f"💬 已加载字幕：{self._字幕们[0].名字}")
         else:
             self.视频.设置字幕(None, False)
         self.引擎.播放()
@@ -232,7 +241,7 @@ class 主窗口(QMainWindow):
             本地弹幕 = 读同名字幕弹幕(Path(路径))
             if 本地弹幕 is not None and len(本地弹幕):
                 self.弹幕.装载本地(本地弹幕, "本地同名")
-                self.状态.showMessage(f"🗨 已加载本地弹幕 {len(本地弹幕)} 条")
+                self.提示(f"🗨 已加载本地弹幕 {len(本地弹幕)} 条")
         except Exception:  # noqa: BLE001
             pass
         # 有逐集记忆就直接装好（不联网、不搜索）：老片子重开时弹幕应当自动就位。
@@ -246,7 +255,7 @@ class 主窗口(QMainWindow):
                     路径=Path(路径), 文件名=Path(路径).name,
                     时长秒=self.引擎.统计.总时长秒, 标题=记录.标题 or "", 集号=集号))
                 if 装载.成功:
-                    self.状态.showMessage(f"🗨 从记忆自动装好 {装载.条数} 条"
+                    self.提示(f"🗨 从记忆自动装好 {装载.条数} 条"
                                      f"（{记录.标题} {记录.集标题}）")
         except Exception as 错:  # noqa: BLE001
             self._写日志(f"[弹幕] 用记忆装载失败（不影响播放）：{错}")
@@ -257,12 +266,12 @@ class 主窗口(QMainWindow):
             位置 = self.记录本.续播位置(str(路径)) if 续播 else 0.0
             if 位置 > 1.0:
                 self.引擎.跳转(位置)
-                self.状态.showMessage(f"⏩ 从上次看到的位置继续：{时间文本(位置)}")
+                self.提示(f"⏩ 从上次看到的位置继续：{时间文本(位置)}")
         except Exception:  # noqa: BLE001
             pass
         self.setWindowTitle(f"网盘管理 V2 · {Path(路径).name}")
         self._建列表(str(路径))
-        self.状态.showMessage(f"▶ {self.引擎.统计.音视频}｜时长 "
+        self.提示(f"▶ {self.引擎.统计.音视频}｜时长 "
                           f"{时间文本(self.引擎.统计.总时长秒)}")
         return True
 
@@ -273,7 +282,7 @@ class 主窗口(QMainWindow):
         try:
             self.引擎.打开(地址, 请求头=请求头 or {})
         except Exception as 错:  # noqa: BLE001
-            self.状态.showMessage(f"❌ 打不开：{错}")
+            self.提示(f"❌ 打不开：{错}")
             return False
         self.视频.清空()
         self._字幕们 = []
@@ -281,7 +290,7 @@ class 主窗口(QMainWindow):
         self.引擎.播放()
         self.播放按钮.setText("⏸ 暂停")
         self.标签.setCurrentIndex(0)
-        self.状态.showMessage(f"▶ {self.引擎.统计.音视频}")
+        self.提示(f"▶ {self.引擎.统计.音视频}")
         return True
 
     def _选文件(self) -> None:
@@ -357,9 +366,9 @@ class 主窗口(QMainWindow):
 
     def _逐帧(self) -> None:
         if self.引擎.逐帧():
-            self.状态.showMessage(f"⏯ 逐帧：{self.引擎.统计.当前时间秒:.3f}s")
+            self.提示(f"⏯ 逐帧：{self.引擎.统计.当前时间秒:.3f}s")
         else:
-            self.状态.showMessage("⏯ 逐帧：没有可前进的帧（先暂停或先播放一下）")
+            self.提示("⏯ 逐帧：没有可前进的帧（先暂停或先播放一下）")
 
     def _切字幕(self) -> None:
         """有多个同名字幕就轮换；一个都没有就手动选一个；都没有就提示。"""
@@ -373,7 +382,7 @@ class 主窗口(QMainWindow):
             try:
                 轨道 = 读字幕文件(路径)
             except Exception as 错:  # noqa: BLE001
-                self.状态.showMessage(f"❌ 读字幕失败：{错}")
+                self.提示(f"❌ 读字幕失败：{错}")
                 return
             self._字幕们 = [轨道]
             self._字幕序号 = 0
@@ -381,11 +390,11 @@ class 主窗口(QMainWindow):
             self._字幕序号 = (self._字幕序号 + 1) % (len(轨道们) + 1)
         if self._字幕序号 >= len(轨道们):
             self.视频.设置字幕(None, False)
-            self.状态.showMessage("💬 已关闭字幕")
+            self.提示("💬 已关闭字幕")
             return
         轨道 = 轨道们[self._字幕序号]
         self.视频.设置字幕(轨道, True)
-        self.状态.showMessage(f"💬 字幕：{轨道.名字}"
+        self.提示(f"💬 字幕：{轨道.名字}"
                           f"（{len(轨道.条目们)} 条）")
 
     def eventFilter(self, 对象, 事件):  # noqa: N802 - Qt 命名
@@ -442,13 +451,13 @@ class 主窗口(QMainWindow):
         缩放 = 图.scaledToHeight(84, Qt.TransformationMode.SmoothTransformation)
         self.预览.setPixmap(QPixmap.fromImage(缩放))
         self.预览.setText("")
-        self.状态.showMessage(f"预览 {时间文本(秒)}")
+        self.提示(f"预览 {时间文本(秒)}")
 
     # ---------------- 弹幕 ----------------
 
     def _切弹幕(self) -> None:
         self.弹幕.设置显示(self.弹幕按钮.isChecked())
-        self.状态.showMessage("🗨 弹幕：" + ("开" if self.弹幕.显示中 else "关")
+        self.提示("🗨 弹幕：" + ("开" if self.弹幕.显示中 else "关")
                           + ("｜" + self.弹幕.摘要() if self.弹幕.有弹幕 else ""))
 
     def _弹幕菜单(self) -> None:
@@ -459,19 +468,19 @@ class 主窗口(QMainWindow):
             self.弹幕.时间轴偏移, -30000, 30000, 100)
         if 好:
             self.弹幕.设置时间轴偏移(偏移)
-            self.状态.showMessage(f"🗨 弹幕偏移 {偏移:+d} ms")
+            self.提示(f"🗨 弹幕偏移 {偏移:+d} ms")
             return
         透明, 好 = QInputDialog.getInt(self, "弹幕不透明度", "10–100：",
                                   int(self.弹幕.配置.不透明度 * 100), 10, 100, 5)
         if 好:
             self.弹幕.配置 = self.弹幕.配置.复制(不透明度=透明 / 100.0)
             self.弹幕.渲染器.设置配置(self.弹幕.配置)
-            self.状态.showMessage(f"🗨 弹幕不透明度 {透明}%")
+            self.提示(f"🗨 弹幕不透明度 {透明}%")
 
     def _装载弹幕(self) -> None:
         """按当前正在播的文件名到弹弹play 找弹幕（找不到就给候选让人选）。"""
         if self.引擎.输入 is None:
-            self.状态.showMessage("先播一个片子，再点「找弹幕」")
+            self.提示("先播一个片子，再点「找弹幕」")
             return
         from ..danmaku.源 import 建默认源
         from ..danmaku.源.接口 import 素材信息
@@ -498,13 +507,13 @@ class 主窗口(QMainWindow):
                     季号=季号, 集号=集号, 额外=附属)
         self._写日志(f"[弹幕] 素材：{Path(地址).name}｜标题「{标题}」"
                    f"｜季 {季号}｜集 {集号}")
-        self.状态.showMessage("🗨 正在找弹幕…")
+        self.提示("🗨 正在找弹幕…")
         应用 = QApplication.instance()
         if 应用 is not None:
             应用.processEvents()
         结果 = self.弹幕.装载(素材, 建默认源())
         if 结果.成功:
-            self.状态.showMessage(f"🗨 已装载 {结果.条数} 条（{结果.来源}）")
+            self.提示(f"🗨 已装载 {结果.条数} 条（{结果.来源}）")
             return
         if 结果.候选们:
             from PySide6.QtWidgets import QInputDialog
@@ -517,11 +526,11 @@ class 主窗口(QMainWindow):
                 采纳 = 结果.候选们[名字们.index(选)]
                 装载 = self.弹幕.用候选装载(素材, 采纳, 建默认源(), 用户选定=True)
                 if 装载.成功:
-                    self.状态.showMessage(f"🗨 已装载 {装载.条数} 条（{装载.来源}），并记住了这个匹配")
+                    self.提示(f"🗨 已装载 {装载.条数} 条（{装载.来源}），并记住了这个匹配")
                 else:
-                    self.状态.showMessage(f"🗨 {装载.说明 or '这个候选没取到弹幕'}")
+                    self.提示(f"🗨 {装载.说明 or '这个候选没取到弹幕'}")
                 return
-        self.状态.showMessage(f"🗨 {结果.说明 or '没找到弹幕'}")
+        self.提示(f"🗨 {结果.说明 or '没找到弹幕'}")
 
     def _刮削路径(self, 路径: str, 强制标识: str = "",
                强制类型=None, 完成后=None) -> None:
@@ -598,7 +607,7 @@ class 主窗口(QMainWindow):
                 self.海报墙.刷新()
             结果 = 结果盒.get("结果")
             待确认数 = int(结果盒.get("待确认") or 0)
-            self.状态.showMessage("🎞 刮削完成：" + (结果.摘要() if 结果 else
+            self.提示("🎞 刮削完成：" + (结果.摘要() if 结果 else
                                               str(结果盒.get("错误") or "无结果"))
                              + f"｜{结果盒.get('统计', '')}"
                              + (f"｜⚠ {待确认数} 条待确认" if 待确认数 else ""))
@@ -676,12 +685,12 @@ class 主窗口(QMainWindow):
             self.弹幕.渲染器.设置配置(新配置)
             self.弹幕按钮.setChecked(bool(新配置.显示))
             self.存弹幕设置()
-            self.状态.showMessage("🗨 弹幕设置：" + 新配置.摘要())
+            self.提示("🗨 弹幕设置：" + 新配置.摘要())
 
         def 规则变了(新规则):
             self.弹幕.设置过滤器(过滤器(新规则))
             self.存弹幕设置()
-            self.状态.showMessage(f"🗨 过滤规则已更新（屏蔽词 {len(新规则.屏蔽词)} 条、"
+            self.提示(f"🗨 过滤规则已更新（屏蔽词 {len(新规则.屏蔽词)} 条、"
                              f"正则 {len(新规则.正则们)} 条）")
         面板.配置变化.connect(配置变了)
         面板.规则变化.connect(规则变了)
@@ -712,7 +721,7 @@ class 主窗口(QMainWindow):
             return
         文件 = self._找媒体主文件(媒体id)
         if not 文件:
-            self.状态.showMessage("🎞 这条资料没有对应的本地文件，改不了")
+            self.提示("🎞 这条资料没有对应的本地文件，改不了")
             return
         self._写日志(f"[刮削] 手动指定 {选择.可读()}")
         self._刮削路径(str(文件), 强制标识=选择.标识, 强制类型=选择.类型)
@@ -733,14 +742,14 @@ class 主窗口(QMainWindow):
         try:
             框 = 待确认对话框(self.资料库, 服务, self, 起始行)
             if 框.条数() == 0 and not self.资料库.待确认():
-                self.状态.showMessage("✅ 没有待确认的条目")
+                self.提示("✅ 没有待确认的条目")
                 return
             框.exec()
             决定 = 框.取决定()
         finally:
             服务.关闭()
         if 决定 is None:
-            self.状态.showMessage("✅ 待确认队列：稍后再处理")
+            self.提示("✅ 待确认队列：稍后再处理")
             return
         if 决定.动作 == "采纳":
             self._刮削路径(决定.路径, 强制标识=决定.标识, 强制类型=决定.类型,
@@ -773,7 +782,7 @@ class 主窗口(QMainWindow):
             新id = int(媒体id) if 媒体id else None
             if self.海报墙 is not None:
                 self.海报墙.刷新()
-            self.状态.showMessage("🎞 资料已保存（手动填写）"
+            self.提示("🎞 资料已保存（手动填写）"
                              + (f"，媒体 id {新id}" if 新id else ""))
 
     def _找媒体主文件(self, 媒体id: int) -> str:
@@ -806,9 +815,9 @@ class 主窗口(QMainWindow):
         目录.mkdir(parents=True, exist_ok=True)
         目标 = 目录 / f"V2_{time.strftime('%Y%m%d_%H%M%S')}.png"
         if self.引擎.截图(str(目标)):
-            self.状态.showMessage(f"📷 已保存 {目标}")
+            self.提示(f"📷 已保存 {目标}")
         else:
-            self.状态.showMessage("📷 截图失败：还没有画面")
+            self.提示("📷 截图失败：还没有画面")
 
     def _存档位置(self) -> None:
         try:
@@ -822,6 +831,26 @@ class 主窗口(QMainWindow):
                     self.记录本.存()
         except Exception:  # noqa: BLE001
             pass
+
+    # ---------------- 状态提示 ----------------
+
+    def 提示(self, 文本: str, 毫秒: int = 8000) -> None:
+        """在状态栏显示一句**临时**提示（默认 8 秒后自己消失）。
+
+        为什么单独有这个方法：播放统计是常驻部件在刷（见 __init__），
+        临时提示必须走 showMessage 才不会互相顶掉；统一收口也方便测试。
+        """
+        try:
+            self.状态.showMessage(str(文本), int(毫秒))
+        except Exception:  # noqa: BLE001 - 状态栏不该影响功能
+            pass
+
+    def 当前提示(self) -> str:
+        """状态栏上正在显示的临时提示（测试/自动化用）。"""
+        try:
+            return str(self.状态.currentMessage())
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _写日志(self, 文本: str) -> None:
         self._日志行.append(文本)
@@ -861,7 +890,7 @@ class 主窗口(QMainWindow):
             self.进度.setValue(int(min(1.0, 统计.当前时间秒 / 统计.总时长秒) * 1000))
         self.时间标签.setText(f"{时间文本(统计.当前时间秒)} / "
                           f"{时间文本(统计.总时长秒)}")
-        self.状态.showMessage(统计.摘要() + f"｜{统计.音视频}")
+        self.统计标签.setText(统计.摘要() + f"｜{统计.音视频}")
         if self.引擎.是否结束():
             self.播放按钮.setText("▶ 重播")
 
