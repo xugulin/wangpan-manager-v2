@@ -552,11 +552,12 @@ class 视频控件字幕测试(unittest.TestCase):
 
 
 class 画面摆放测试(unittest.TestCase):
-    """画面的摆法：**贴左上角**、保持比例、只多不少。
+    """画面怎么摆：默认**铺满**（不留黑边）、贴左上角；另有适应/拉伸两种模式。
 
-    这一条来自用户真机使用反馈："GUI窗口变化时视频的左上角没有在播放页播放器的
-    左上角对齐"。原来画面是**居中**摆的 —— 窗口一变宽窄，左右黑边就跟着变，
-    画面看着像在"跳"。改成贴左上角后，多余的地方只在右边/下边变黑。
+    这一组是用户两次真机反馈的结果：
+    * 先说"窗口一变，画面没跟播放器左上角对齐"（当时居中）；
+    * 改成贴左上角后又发现"右侧有大黑边"（适应式会把余量全堆在右边）。
+    ⇒ 默认铺满（按 max 缩放，多余裁掉）+ 贴左上角：**没有黑边、也不跳**。
     """
 
     @classmethod
@@ -570,35 +571,47 @@ class 画面摆放测试(unittest.TestCase):
         控件.设置帧(QImage(图宽, 图高, QImage.Format.Format_RGB32))
         return 控件
 
-    def test_贴左上角(self):
-        控件 = self._控件(800, 600)          # 比 16:9 更方 → 左右会留黑边
+    def test_默认铺满且没有黑边(self):
+        控件 = self._控件(1360, 600, 1920, 1080)      # 播放区比视频更宽
         区 = 控件.目标矩形()
-        self.assertEqual((区.x(), 区.y()), (0, 0),
-                         f"画面左上角必须贴在控件左上角，实际 {区}")
-        self.assertEqual(区.width(), 800, "宽先顶满（4:3 控件里 16:9 画面按宽贴边）")
-        self.assertEqual(区.height(), 450)
+        self.assertEqual(控件.缩放模式, "铺满", "默认必须是铺满（用户要求不留黑边）")
+        self.assertEqual((区.x(), 区.y()), (0, 0), "仍然贴左上角")
+        self.assertGreaterEqual(区.width(), 控件.width() - 1, "横向要铺满，不许留黑边")
+        self.assertGreaterEqual(区.height(), 控件.height() - 1, "纵向也要铺满")
 
-    def test_上下留黑边时也贴左上角(self):
-        控件 = self._控件(1200, 400)         # 很扁的控件 → 上下留黑边
+    def test_适应模式居中留黑边(self):
+        控件 = self._控件(1360, 600, 1920, 1080)
+        self.assertTrue(控件.设置缩放模式("适应"))
         区 = 控件.目标矩形()
-        self.assertEqual((区.x(), 区.y()), (0, 0), f"仍然要贴左上角，实际 {区}")
-        self.assertEqual(区.height(), 400)
-        self.assertEqual(区.width(), int(320 * (400 / 180)))
+        self.assertLessEqual(区.width(), 控件.width())
+        self.assertLessEqual(区.height(), 控件.height() + 1)
+        self.assertAlmostEqual(区.x(), (控件.width() - 区.width()) / 2, delta=1,
+                            msg="适应模式要居中，黑边两侧平分")
+        self.assertTrue(控件.设置缩放模式("铺满"), "切回去要生效")
+
+    def test_拉伸模式正好填满(self):
+        控件 = self._控件(1000, 400, 1920, 1080)
+        控件.设置缩放模式("拉伸")
+        区 = 控件.目标矩形()
+        self.assertEqual((区.width(), 区.height()), (1000, 400))
+
+    def test_不认识的模式被拒绝(self):
+        from wangpan.ui.视频控件 import 视频控件
+        控件 = 视频控件()
+        self.assertFalse(控件.设置缩放模式("乱写"))
+        self.assertEqual(控件.缩放模式, "铺满")
 
     def test_窗口变宽画面不动(self):
-        """窗口变宽时，画面左上角必须**不动**（这是用户要的"不跳"）。"""
+        """铺满模式下画面恒从 (0,0) 开始 —— 窗口怎么变都不会位移。"""
         窄 = self._控件(640, 360).目标矩形()
         宽 = self._控件(1280, 360).目标矩形()
-        self.assertEqual((窄.x(), 窄.y()), (宽.x(), 宽.y()),
-                         "窗口变宽不该让画面位移")
+        self.assertEqual((窄.x(), 窄.y()), (宽.x(), 宽.y()))
 
     def test_尺寸变化会上报(self):
         """控件尺寸变了要发信号 —— 页面据此同步引擎输出尺寸（不再去 resize 窗口）。"""
         控件 = self._控件(640, 360)
         收到 = []
         控件.尺寸变了.connect(lambda w, h: 收到.append((w, h)))
-        # ⚠️ 隐藏的控件 resize 不一定投递事件（Qt 会把几何改动攒着），
-        #    所以这里先 show() ——真实使用中控件当然是显示着的。
         控件.show()
         _取应用().processEvents()
         控件.resize(900, 500)

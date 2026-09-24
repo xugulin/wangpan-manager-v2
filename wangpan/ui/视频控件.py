@@ -36,6 +36,8 @@ class 视频控件(QWidget):
         self.setMinimumSize(320, 180)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        #: 画面缩放模式（见 目标矩形 的说明）：铺满 / 适应 / 拉伸
+        self.缩放模式 = "铺满"
         self._图: Optional[QImage] = None
         self._原始帧 = None
         self._显示计数 = 0
@@ -81,12 +83,18 @@ class 视频控件(QWidget):
     # ---------------- 绘制 ----------------
 
     def 目标矩形(self) -> QRect:
-        """把画面按比例放进控件（保持比例，**贴左上角**，多余的地方留黑）。
+        """把画面按当前**缩放模式**摆进控件。
 
-        为什么是左上角而不是居中（这是用户真机使用后明确要求的）：
-        居中时窗口一变宽高，画面就跟着左右/上下"跳"——黑边一左一右地变，
-        看起来像画面没对齐播放器；贴左上角后画面稳稳待在播放器左上角，
-        多余的像素只在右边/下边变成黑边，窗口怎么拖画面都不动。
+        模式（用户真机两次反馈的结论）：
+        * ``铺满``（**默认**）：按 ``max`` 缩放，画面**填满**播放区、多余的裁掉 ——
+          右侧/下侧不会留下大片黑边。用户先说"画面没跟播放器左上角对齐"（当时是居中），
+          改贴左上角后又发现"右侧有大黑边"（因为适应式会把余量全堆在右边）。
+          铺满 + 贴左上角两个诉求同时满足：**没有黑边、也不跳**。
+        * ``适应``：按 ``min`` 缩放，整幅画面都看得见，多余的地方留黑（老行为）。
+        * ``拉伸``：不保持比例，硬填满（有人专门要这个）。
+
+        字幕/弹幕是在这一层之上另画的，所以"铺满"裁掉的是**视频像素**，
+        不会把字幕一起裁掉。
         """
         区域 = self.rect()
         if self._图 is None or self._图.isNull():
@@ -94,10 +102,30 @@ class 视频控件(QWidget):
         图宽, 图高 = self._图.width(), self._图.height()
         if 图宽 <= 0 or 图高 <= 0:
             return 区域
-        缩放 = min(区域.width() / 图宽, 区域.height() / 图高)
-        宽 = max(1, int(图宽 * 缩放))
-        高 = max(1, int(图高 * 缩放))
+        模式 = str(getattr(self, "缩放模式", "铺满") or "铺满")
+        if 模式 == "拉伸":
+            return QRect(0, 0, max(1, 区域.width()), max(1, 区域.height()))
+        if 模式 == "适应":
+            缩放 = min(区域.width() / 图宽, 区域.height() / 图高)
+            宽 = max(1, int(图宽 * 缩放))
+            高 = max(1, int(图高 * 缩放))
+            # 适应模式下居中：整幅都在时，黑边两侧平分看着最正常
+            return QRect((区域.width() - 宽) // 2, (区域.height() - 高) // 2, 宽, 高)
+        缩放 = max(区域.width() / 图宽, 区域.height() / 图高)
+        宽 = max(1, int(round(图宽 * 缩放)))
+        高 = max(1, int(round(图高 * 缩放)))
         return QRect(0, 0, 宽, 高)
+
+    def 设置缩放模式(self, 模式: str) -> bool:
+        """切换缩放模式（铺满 / 适应 / 拉伸）。返回是不是真的变了。"""
+        模式 = str(模式 or "")
+        if 模式 not in ("铺满", "适应", "拉伸"):
+            return False
+        if getattr(self, "缩放模式", "铺满") == 模式:
+            return False
+        self.缩放模式 = 模式
+        self.update()
+        return True
 
     def paintEvent(self, _事件):  # noqa: N802 - Qt 命名
         画 = QPainter(self)

@@ -213,8 +213,10 @@ class 播放器窗口(QWidget):
             self.AI面板 = None
             self.左面板.addTab(QWidget(), "🤖 AI 助手")
             self.AI输出 = None
-        self.左面板.setMaximumWidth(420)
-        self.主体.addWidget(self.左面板)
+        self.左面板.setMaximumWidth(520)
+        # 面板做成**独立悬浮窗口**（用户要求：主界面改了，独立播放器也要改）。
+        # 所以它不钉在本窗口右侧，主体里只有画面。
+        self._面板窗口 = None
         self.主体.setStretchFactor(0, 1)
         self.主体.setStretchFactor(1, 0)
         self.主体.setSizes([820, 300])
@@ -418,7 +420,10 @@ class 播放器窗口(QWidget):
         return self.清单.当前行() >= len(self.清单) - 1
 
     def 切换侧栏(self, 显示: bool = True) -> None:
-        self.左面板.setVisible(bool(显示))
+        if 显示:
+            self.显示面板窗口()
+        else:
+            self.隐藏面板窗口()
 
     def 切换清单(self, 显示: bool = True) -> None:
         self.左面板.setCurrentWidget(self.清单)
@@ -569,7 +574,27 @@ class 播放器窗口(QWidget):
         self.回调("归还播放", self)
         self.关闭(不归还=True)
 
+    def 显示面板窗口(self) -> None:
+        """把「播放清单 / AI 助手」显示成独立悬浮窗口（高度跟随本窗口）。"""
+        if self._面板窗口 is None:
+            from .悬浮面板 import 悬浮面板窗口
+            self._面板窗口 = 悬浮面板窗口(self.左面板, 主窗口=self)
+        self._面板窗口.显示()
+
+    def 隐藏面板窗口(self) -> None:
+        if self._面板窗口 is not None:
+            self._面板窗口.隐藏()
+
+    def 收尾面板窗口(self) -> None:
+        if self._面板窗口 is not None:
+            try:
+                self._面板窗口.收尾()
+            except Exception:  # noqa: BLE001
+                pass
+            self._面板窗口 = None
+
     def 关闭(self, 不归还: bool = False) -> None:
+        self.收尾面板窗口()
         if not 不归还:
             self.回调("归还播放", self)
         self._搬回()
