@@ -1,6 +1,6 @@
 [project]
 name = "wangpan-manager"
-version = "2.0.0"
+version = "2.1.0"
 description = "网盘管理：V1 的界面/网盘管理/AI + V2 的自研 libav 播放内核（含弹幕与 TMDB 刮削）"
 requires-python = ">=3.11"
 # 真实的第三方依赖（AST 扫描得出，清单与理由见 requirements.txt）

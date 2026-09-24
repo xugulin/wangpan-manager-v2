@@ -39,6 +39,32 @@ class 启动器测试(unittest.TestCase):
         self.assertTrue(启动脚本.is_file(), "缺少一键启动脚本")
         self.assertTrue(os.access(启动脚本, os.X_OK), "一键启动脚本要有可执行位（双击才跑得起来）")
 
+    def test_变量名引用也必须是ASCII(self):
+        """`$变量` / `${变量...}` 里的名字也必须是 ASCII。
+
+        为什么单独加一条：原来的检查只看"赋值语句左边"，而
+        `${V2_跳过环境自愈:-}` 这种**引用**同样会被 dash 判成
+        "错误的替换"（真机发布前实测：一键启动直接报错、后面的自愈代码整段没跑，
+        解压出来的包因此不可用）。这种名字一眼看不出问题，必须由测试盯住。
+        """
+        import re as _re
+        # 判据：`$` 或 `${` **紧跟**一个非 ASCII 字符 —— 那才是"中文变量名"。
+        # 不能贪婪地抓整个名字：`"退出码 $RC（详见）"` 里 `$RC` 是好的，
+        # 后面的中文只是文案（第一版这么写，误报了 13 处）。
+        模式 = _re.compile(r"\$\{?([^\x00-\x7f])")
+        坏: list[str] = []
+        for 路径 in (启动脚本, 安装脚本):
+            if not 路径.is_file():
+                continue
+            for 行号, 行 in enumerate(路径.read_text(encoding="utf-8").splitlines(), 1):
+                纯 = 行.strip()
+                if 纯.startswith("#"):
+                    continue          # 注释里提到不算
+                for 命中 in 模式.finditer(行):
+                    坏.append(f"{路径.name}:{行号} 变量名以 {命中.group(1)!r} 开头")
+        self.assertEqual(坏, [], "shell 变量名必须 ASCII，否则 dash 会报\"错误的替换\"：\n  "
+                               + "\n  ".join(坏))
+
     def test_只用POSIX语法与ASCII标识符(self):
         """某些文件管理器用非 bash 的 shell 解析它：POSIX 语法 + **ASCII 标识符**才稳。
 

@@ -52,14 +52,54 @@ fi
 PROJ=$(cd -- "$PROJ" && pwd)
 cd -- "$PROJ" || exit 1
 
+# ---- 便携自愈：把被解压工具丢掉的符号链接与 pyvenv.cfg 补回来 ----
+# 发布包里的 venv 建在**包内自带的独立 CPython** 上，解释器是符号链接
+# （运行环境/venv/bin/python3.14 -> ../../python/bin/python3.14）。
+# `7z x` 出于安全会**拒绝**创建"指向目录之外"的链接（实测丢了 302 个），
+# 解压出来的包就会报 `No module named 'encodings'`；图形解压器/unzip 行为也各不相同。
+# 这里在启动 python 之前按实际位置补一次（幂等、几毫秒），用户用什么解压都能用。
+# 关掉：V2_SKIP_ENV_FIX=1
+BASE_PY="$PROJ/运行环境/python/bin/python3.14"
+fix_one_venv() {
+  _v="$PROJ/$1"
+  [ -d "$_v" ] || return 0
+  [ -e "$BASE_PY" ] || return 0
+  _l="$_v/bin/python3.14"
+  # 只修坏掉的链接（详见 启动.sh 里的说明）：7z 拒绝创建时会留个 0 字节普通文件
+  if [ ! -L "$_l" ] || [ ! -e "$_l" ]; then
+    ln -sfn "$2" "$_l" 2>/dev/null || true
+    [ -e "$_v/bin/python" ] || ln -sfn python3.14 "$_v/bin/python" 2>/dev/null || true
+    [ -e "$_v/bin/python3" ] || ln -sfn python3.14 "$_v/bin/python3" 2>/dev/null || true
+  fi
+  _cfg="$_v/pyvenv.cfg"
+  [ -f "$_cfg" ] || return 0
+  _cur=$(sed -n 's/^home = //p' "$_cfg" 2>/dev/null | head -1)
+  if [ -n "$_cur" ] && [ ! -x "$_cur/python3.14" ] && [ ! -x "$_cur/python3" ] \
+     && [ ! -x "$_cur/python" ]; then
+    sed -i "s|^home = .*|home = $PROJ/运行环境/python/bin|" "$_cfg" 2>/dev/null || true
+  elif [ -z "$_cur" ]; then
+    printf 'home = %s\n' "$PROJ/运行环境/python/bin" >> "$_cfg" 2>/dev/null || true
+  fi
+}
+
+if [ "${V2_SKIP_ENV_FIX:-}" != "1" ]; then
+  fix_one_venv "运行环境/venv" "../../python/bin/python3.14"
+  fix_one_venv "运行环境/语音识别/venv" "../../../python/bin/python3.14"
+fi
+
 # 项目自带的解释器（本项目有自己的 运行环境/venv，不依赖系统 python）
 PY="$PROJ/运行环境/venv/bin/python"
 if [ ! -x "$PY" ]; then
   echo "[!] 找不到项目自带解释器：$PY" >&2
-  echo "    本项目自带运行环境（与 V1、系统 python 都不共享）。先建环境：" >&2
-  echo "      python3 -m venv 运行环境/venv" >&2
-  echo "      运行环境/venv/bin/pip install PySide6" >&2
-  _pause "缺少项目自带的 Python 环境（运行环境/venv）。先按 README 建好环境。"
+  if [ -e "$BASE_PY" ]; then
+    echo "    包内有自带 CPython，但 venv 的链接没建起来 —— 试试：" >&2
+    echo "      ln -sfn ../../python/bin/python3.14 运行环境/venv/bin/python3.14" >&2
+  else
+    echo "    这里是源码树（不是发布包）：先按 README 建好自带运行环境。" >&2
+    echo "      python3 -m venv 运行环境/venv" >&2
+    echo "      运行环境/venv/bin/pip install -r requirements.txt" >&2
+  fi
+  _pause "缺少项目自带的 Python 环境（运行环境/venv）。"
   exit 1
 fi
 
