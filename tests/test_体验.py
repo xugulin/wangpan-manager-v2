@@ -169,10 +169,21 @@ class 章节与缩略图测试(unittest.TestCase):
         引擎.播放()
         time.sleep(0.3)
         self.assertTrue(引擎.跳章节(2))
-        截止 = time.time() + 4
-        while time.time() < 截止 and 引擎.统计.当前时间秒 < 3.5:
+        # ⚠️ 别用固定的 4 秒死等：CI 的 runner 一忙起来（实测同一份代码
+        #    从 90s 变成 144s），解码线程 4 秒内推不到 3.5 秒处，这条就**假红**
+        #    （Windows CI #37 抓到：1 != 2）。改成"轮询条件 + 宽松死线"：
+        #    真坏（跳章节没生效）永远等不到 2，依然会失败；慢机器不再误报。
+        截止 = time.time() + 20
+        见到 = 0
+        while time.time() < 截止:
+            当前 = 引擎.当前章节() or 0
+            见到 = max(见到, 当前)
+            if 见到 >= 2:
+                break
             time.sleep(0.05)
-        self.assertEqual(引擎.当前章节(), 2, "跳到第三章后当前章节应该是 2")
+        self.assertEqual(见到, 2,
+                         "跳到第三章后当前章节应该是 2；"
+                         f"实际只到 {见到}（当前时间 {引擎.统计.当前时间秒:.2f}s）")
         self.assertFalse(引擎.跳章节(99), "越界的章节号要返回 False")
 
     def test_缩略图能出图(self):

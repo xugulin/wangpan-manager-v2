@@ -88,6 +88,10 @@ jobs:
           运行环境\venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 
       - name: 界面验收（合并后的 GUI 逐页截图 + 真播像素校验）
+        # ⚠️ 加 always()：单测里任何一条抖动都不该把"界面到底画没画出来"的证据跳过
+        #    （CI #37 实测：单测红了一次，后面三步全 skipped，产物里只剩一个文件，
+        #     排查时完全看不到界面验收的结果）。
+        if: always()
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
@@ -102,6 +106,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "界面验收没通过（退出码 $LASTEXITCODE）" }
 
       - name: 真机播放测试（出画面 / 硬解或回退 / 截图 / 网络 Range）
+        if: always()
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
