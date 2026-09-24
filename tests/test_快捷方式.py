@@ -232,6 +232,48 @@ class 安装脚本测试(unittest.TestCase):
         return subprocess.run(["sh", str(安装脚本), *参数], capture_output=True, text=True,
                           env=self.环境, cwd=str(项目根), timeout=120)
 
+    def test_工作区模式只生成工作区文件(self):
+        """`--工作区` 只往项目根写一个 .desktop，不碰菜单/桌面/图标主题。
+
+        为什么单独钉一条：这个模式是给"想先看一眼、想自己拷到别处"用的，
+        一旦它顺手装了菜单项或桌面图标，就变成了**有副作用的查看命令** ——
+        而它偏偏最可能被随手跑（比如排查"快捷方式对吗"的时候）。
+        """
+        条目 = 项目根 / "网盘管理.desktop"
+        # ⚠️ 这个模式的目标就是项目根，所以测试**必须别把用户自己的产物删掉**：
+        #    本来就有就原样还原，本来没有才清掉（第一版直接 unlink，
+        #    结果跑一次全量测试就把用户生成好的桌面启动文件删了 —— 实测踩到）。
+        原有 = 条目.read_bytes() if 条目.is_file() else None
+        子 = self._跑("--工作区")
+        self.assertIn("工作区启动文件", 子.stdout, f"输出不对：{子.stdout}{子.stderr}")
+        try:
+            self.assertTrue(条目.is_file(), "没在工作区生成 .desktop")
+            文本 = 条目.read_text(encoding="utf-8")
+            必需 = {"Type=Application": "Type", "Name=网盘管理": "Name",
+                  "Terminal=false": "Terminal",
+                  "StartupWMClass=网盘管理V2": "StartupWMClass"}
+            for 片段, 名字 in 必需.items():
+                self.assertIn(片段, 文本, f"缺 {名字}")
+            self.assertTrue(os.access(条目, os.X_OK),
+                            ".desktop 要可执行（桌面才会当启动器）")
+            # Exec 指向的脚本与 Icon 指向的图片都必须真的在
+            启动行 = next(x for x in 文本.splitlines() if x.startswith("Exec="))
+            可执行 = 启动行.split("=", 1)[1].split("%")[0].strip().strip('"')
+            self.assertTrue(Path(可执行).is_file(), f"Exec 指向的文件不存在：{可执行}")
+            图标行 = next(x for x in 文本.splitlines() if x.startswith("Icon="))
+            self.assertTrue(Path(图标行.split("=", 1)[1]).is_file(),
+                            "Icon 指向的文件不存在")
+            # 只生成工作区文件时，不该顺手动菜单项/桌面图标
+            self.assertFalse((self.数据 / "applications" / "网盘管理_V2.desktop").exists(),
+                             "这个模式不该装菜单项")
+            self.assertFalse((self.桌面 / "一键启动_网盘管理_V2.desktop").exists(),
+                             "这个模式不该装桌面图标")
+        finally:
+            if 原有 is None:
+                条目.unlink(missing_ok=True)
+            else:
+                条目.write_bytes(原有)
+
     def test_安装后三处都在且内容正确(self):
         子 = self._跑()
         self.assertIn("菜单项", 子.stdout, f"安装输出不对：{子.stdout}{子.stderr}")

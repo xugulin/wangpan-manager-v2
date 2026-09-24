@@ -77,6 +77,15 @@
 
 * **桌面图标 / 应用菜单**：`工具/安装快捷方式.sh`（Linux）、
   `工具/安装快捷方式.ps1`（Windows，`powershell -ExecutionPolicy Bypass -File …`）。
+  只想在**工作区**里生成一个 `.desktop`（不动菜单与桌面、方便先看一眼或自己拷走）：
+
+  ```bash
+  工具/安装快捷方式.sh --工作区      # → ./网盘管理.desktop（可执行、已过 desktop-file-validate）
+  ```
+
+  产物里带的是**本机绝对路径**（`.desktop` 的 `Exec`/`Path`/`Icon` 只能写绝对路径），
+  所以它和 `配置.json` 一样属于生成物、已在 `.gitignore` 里；换台机器重新生成即可。
+  `%F` 也接好了：把视频拖到图标上就直接开播。
 * **依赖**：`requirements.txt`（清单是按**源码 AST 扫描**列的，不是照抄旧环境）。
   自带 venv 里已经装好；换机器时
   `运行环境/venv/bin/pip install -r requirements.txt`。

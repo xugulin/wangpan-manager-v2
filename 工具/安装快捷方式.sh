@@ -21,6 +21,8 @@
 #    工具/安装快捷方式.sh --目录 ~/桌面     # 指定桌面目录
 #    工具/安装快捷方式.sh --卸载           # 卸载（只删自己装的这几个文件）
 #    工具/安装快捷方式.sh --查看           # 打印现在装了什么、指向哪里
+#    工具/安装快捷方式.sh --工作区         # **只**在工作区里生成 网盘管理.desktop
+#                                          # （不碰应用菜单/桌面/图标主题，方便先看一眼）
 # =============================================================================
 set -u
 
@@ -42,6 +44,7 @@ DESKTOP_FILE="$APPS_DIR/$APP_ID.desktop"
 WANT_DESKTOP=1
 DO_UNINSTALL=0
 DO_SHOW=0
+WANT_WORKSPACE=0
 DESKTOP_ARG=""
 
 while [ $# -gt 0 ]; do
@@ -50,6 +53,9 @@ while [ $# -gt 0 ]; do
     --桌面|--desktop)      WANT_DESKTOP=1 ;;
     --卸载|--uninstall)    DO_UNINSTALL=1 ;;
     --查看|--show)         DO_SHOW=1 ;;
+    # 只生成到工作区：想先看看 .desktop 长什么样、或者要自己拷到别处时用。
+    # 变量名必须 ASCII（见文件开头那条警告）。
+    --工作区|--workspace)  WANT_WORKSPACE=1 ;;
     --目录|--dir)          shift || true; DESKTOP_ARG=${1:-} ;;
     -h|--help)             sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "[!] 不认识的参数：$1（用 --help 看用法）" >&2; exit 2 ;;
@@ -151,8 +157,6 @@ if [ ! -f "$ICON_PNG" ]; then
 fi
 if [ "$fail" -ne 0 ]; then exit 1; fi
 
-mkdir -p -- "$APPS_DIR" || exit 1
-
 # ---------------- 写 .desktop ----------------
 #: 让桌面把 .desktop 当"可信启动器"：GNOME/COSMIC 系不看这个标记的话，
 #: 双击会弹一次"不受信任的应用启动器"，要用户手动允许 —— 用户要的是**双击就跑**。
@@ -189,6 +193,35 @@ write_entry() {
   mark_trusted "$target"
 }
 
+# ---------------- 只生成到工作区（不碰菜单/桌面/图标主题）----------------
+#  为什么要有这个模式：产物里带的是**本机的绝对路径**（.desktop 的 Exec/Path/Icon
+#  只能写绝对路径），所以它属于"生成物"而不是源码 —— 想看一眼、想自己拷到别处、
+#  或者只想确认内容对不对，用这个模式，别动用户的菜单和桌面。
+if [ "$WANT_WORKSPACE" -eq 1 ]; then
+  WORKSPACE_FILE="$PROJ/$APP_NAME.desktop"
+  if ! write_entry "$WORKSPACE_FILE"; then
+    echo "[X] 写不了 $WORKSPACE_FILE" >&2
+    exit 1
+  fi
+  echo "✓ 工作区启动文件：$WORKSPACE_FILE"
+  echo "    启动的是：$LAUNCHER"
+  echo "    图标用的是：$ICON_PNG"
+  if command -v desktop-file-validate >/dev/null 2>&1; then
+    if desktop-file-validate "$WORKSPACE_FILE"; then
+      echo "    ✓ desktop-file-validate 通过"
+    else
+      echo "    [!] desktop-file-validate 报了问题（见上），文件已生成" >&2
+    fi
+  else
+    echo "    [i] 没装 desktop-file-validate，跳过格式校验"
+  fi
+  echo
+  echo "放到桌面 / 应用菜单（顺带做"可信"标记与图标主题）：$0"
+  echo "手动拷到桌面后双击若提示"不受信任"，那是因为拷丢了可信标记，跑一次上面那条即可。"
+  exit 0
+fi
+
+mkdir -p -- "$APPS_DIR" || exit 1
 write_entry "$DESKTOP_FILE" || { echo "[X] 写不了 $DESKTOP_FILE" >&2; exit 1; }
 echo "✓ 菜单项：$DESKTOP_FILE"
 
