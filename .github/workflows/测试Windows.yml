@@ -87,6 +87,20 @@ jobs:
         run: |
           运行环境\venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 
+      - name: 界面验收（合并后的 GUI 逐页截图 + 真播像素校验）
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          # 这是"用户视角"里最像人工点一遍的那条：把**合并后的主窗口**真的建起来
+          # （V1 的界面层 + 假网盘，免登录），8 个页面逐页切过去各抓一张图，
+          # 再用**自研内核**真播一段素材，并对画面做像素校验（黑屏会是 0 亮/1 色）。
+          # 同一个脚本在 Linux 与本机 wine 里也跑（见 工具/wine验证.py）。
+          运行环境\venv\Scripts\python.exe 工具\界面验收.py
+          if ($LASTEXITCODE -ne 0) { throw "界面验收没通过（退出码 $LASTEXITCODE）" }
+
       - name: 真机播放测试（出画面 / 硬解或回退 / 截图 / 网络 Range）
         shell: pwsh
         env:
@@ -112,6 +126,21 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          foreach ($f in @('数据\真机验收.txt', '数据\诊断播放.txt')) {
+          foreach ($f in @('数据\界面验收.txt', '数据\真机验收.txt', '数据\诊断播放.txt')) {
             if (Test-Path $f) { Write-Host "==== $f ===="; Get-Content $f -Encoding UTF8 }
           }
+
+      - name: 收走截图与报告（构建产物，事后能直接看）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-界面验收-截图与报告
+          # 截图是"界面真的画出来了"的直接证据；报告是结构化结果（含像素校验数字）。
+          path: |
+            数据/界面验收/*.png
+            数据/界面验收.txt
+            数据/真机验收.txt
+            数据/真机验收/*.png
+            数据/诊断播放.txt
+          if-no-files-found: warn
+

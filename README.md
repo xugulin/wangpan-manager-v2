@@ -180,7 +180,7 @@ V2 的**海报墙 / 详情页 / 待确认队列 / 手动匹配 / 手动资料 / 
 
 ## 验证证据（本机离屏真机）
 
-### 测试：1143 条全绿
+### 测试：1148 条全绿
 
 ```
 $ 运行环境/venv/bin/python -m unittest discover -s tests -t .
@@ -262,6 +262,52 @@ $ 运行环境/venv/bin/python 工具/整合验收.py
 `--平台 wayland` 在无焦点时会明确报「跳过」并给出做法（先用鼠标点一下窗口再重跑），
 而**完整的交互覆盖由 `--平台 xcb` 提供** —— 同一份二进制、同一批代码路径，
 只是 Qt 平台插件不同；Wayland 下的渲染与播放由 `grim` 截图证明。
+
+### Windows 路径怎么在本机验（wine）
+
+GitHub 的 Windows runner 一次要排队 + 跑十分钟，所以本机用 **wine 11** 先把 Windows
+那条路验一遍（wine 提供的是真的 PE 加载器 + 真的 `python314.dll`）。
+
+```bash
+# 一次性备料（Windows 侧运行时，约 940 MB，不进仓库）
+#   1) Windows CPython + PySide6：直接用 V1 留下的 构建/windows/python主
+#   2) Windows 版 libav DLL —— **必须 avcodec 63**（偏移表是按 63 生成的，
+#      拿 61 的 DLL 去配 63 的表会读出垃圾）
+mkdir -p 构建/windows/libav
+curl -L -o /tmp/ff-win.zip \
+  https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip
+7z x -y -o构建/windows/ffx /tmp/ff-win.zip
+cp 构建/windows/ffx/*/bin/av*.dll 构建/windows/ffx/*/bin/sw*.dll 构建/windows/libav/
+
+# 验（平台中立的验收脚本，wine 只做了一层薄包装）
+WINEDEBUG=-all 运行环境/venv/bin/python 工具/wine验证.py
+```
+
+wine 上实测（2026-09）：
+
+| 项目 | 结果 |
+|---|---|
+| 平台 / Python / PySide6 | `nt` / 3.14.7 / 6.11.2（真 Windows 运行时） |
+| libav + ABI 自检 | avformat 63.7.100、**avcodec 63.14.100** → 偏移表匹配 ✔ |
+| 合并后的主窗口 | **8 个页面全部建起来**，逐页 `grab()` 落图 ✔ |
+| 自研内核真解码 | 40 帧、0 丢帧、`有画面`；画面层像素 **6837 亮点 / 195 种颜色** ✔ |
+| 硬解回退 | wine 的 D3D11 不完整 → **自动回退软解并给出原因**（真 Windows 用 D3D11VA） |
+| 退出收尾 | 关窗无异常 ✔ |
+
+三条 wine 上的经验（脚本里都注释了原因）：必须 `QT_QPA_PLATFORM=offscreen`
+（wine 的 GL 渲染复杂界面会段错误，而 offscreen 下 `grab()` 拿到的仍是真实 Windows 渲染）；
+结果写 UTF-8 的 JSON 文件而**别读 stdout**（wine 控制台会把中文变成乱码）；
+wine 里 Qt 找不到中文字体，所以截图上的汉字是方框 —— 那是字体映射问题，看布局和像素即可。
+
+同一个脚本平台中立，Linux 本机也跑它（`工具/界面验收.py`，产出 `数据/界面验收/`），
+CI 的 Windows runner 也跑它并把截图当构建产物收走。
+
+### GitHub 上的 Windows 真机测试
+
+`.github/workflows/测试Windows.yml`（push 到 main 自动跑，也可手动触发）12 步：
+装依赖 → 下载 FFmpeg DLL → 绑定自检（ABI）→ 合并入口 CLI → **1148 条单测** →
+**界面验收（8 页截图 + 真播像素校验）** → 真机播放验收 → 播放诊断 → 打印日志 →
+**收走截图与报告**（actions/upload-artifact，事后能直接下载看）。
 
 ### 网络直链那条路（探测 → AI 决策 → 起播）
 
