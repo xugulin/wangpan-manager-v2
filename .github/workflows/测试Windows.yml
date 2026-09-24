@@ -22,15 +22,23 @@ jobs:
 
       - name: 装依赖（requirements.txt）/ 建自带运行环境
         shell: pwsh
+        env:
+          # ⚠️ 这一步必须显式设 UTF-8：Windows 控制台默认 cp936，而 venv 路径里有中文
+          #    （运行环境\venv），pip 打印任何带中文的内容都可能在 rich 的 emit 阶段
+          #    UnicodeEncodeError —— 报错栈看起来在 pip/_vendor/rich/console.py 里，
+          #    跟"装依赖"八竿子打不着，排查很费劲（CI 真机日志实测）。
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
-          # ⚠️ 不能只装 PySide6 了：整合之后这个仓库里有 V1 那一层
+          # ⚠️ 不能只装 PySide6：整合之后这个仓库里有 V1 那一层
           #    （v8_3/：界面 / 三家网盘适配器桥 / AI），它要 httpx、pyahocorasick、
           #    pypinyin、qrcode、oss2、websocket-client …… 只装 PySide6 的话
           #    V1 那 449 条测试会在 import 阶段就全红。
+          # ⚠️ 这里也**不要**写 `python -c "…中文…"`（同一条坑，见上面的 env 注释）。
           python -m venv 运行环境/venv
           运行环境\venv\Scripts\python.exe -m pip install --upgrade pip
           运行环境\venv\Scripts\python.exe -m pip install -r requirements.txt
-          运行环境\venv\Scripts\python.exe -c "import PySide6, httpx, ahocorasick, pypinyin, qrcode; print('依赖就绪：PySide6', PySide6.__version__, '| httpx', httpx.__version__)"
+          运行环境\venv\Scripts\python.exe -c "import PySide6, httpx, ahocorasick, pypinyin, qrcode; print('deps ok:', PySide6.__version__, '| httpx', httpx.__version__)"
 
       - name: 下载 Windows 版 FFmpeg 运行库（libav* 的 DLL）
         shell: pwsh
