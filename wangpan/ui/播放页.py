@@ -90,6 +90,9 @@ class 播放页(QWidget):
         self.视频.设置弹幕控制器(self.弹幕)
         self.视频.双击.connect(self.切换全屏)
         self.视频.单击.connect(self.播放暂停)
+        # 视频区自己变尺寸时同步引擎的输出尺寸。这样"隐藏侧栏让画面变大"这件事
+        # 就不再需要去 resize 主窗口（原先正是它导致点一下面板窗口就变形）。
+        self.视频.尺寸变了.connect(self._视频区变了)
 
         self._定时器 = QTimer(self)
         self._定时器.setInterval(16)
@@ -884,16 +887,24 @@ class 播放页(QWidget):
         if self.引擎.是否结束():
             self.播放按钮.setText("▶ 重播")
 
+    def _视频区变了(self, 宽: int, 高: int) -> None:
+        """视频区尺寸变了 → 告诉引擎"界面只需要这么大"。
+
+        只改**解码输出尺寸**（省掉每帧搬 25 MB），绝不改窗口尺寸。
+        """
+        if 宽 <= 0 or 高 <= 0:
+            return
+        try:
+            self.引擎.设置输出尺寸(int(宽), int(高))
+        except Exception:  # noqa: BLE001 - 只是优化，失败不该影响播放
+            pass
+
     def resizeEvent(self, 事件):  # noqa: N802 - Qt 命名
         超级 = getattr(super(), "resizeEvent", None)
         if 超级 is not None:
             超级(事件)
         区域 = self.视频.size()
-        if 区域.width() > 0 and 区域.height() > 0:
-            try:
-                self.引擎.设置输出尺寸(区域.width(), 区域.height())
-            except Exception:  # noqa: BLE001
-                pass
+        self._视频区变了(区域.width(), 区域.height())
 
     # ------------------------------------------------------------------ 键盘
 

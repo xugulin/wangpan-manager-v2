@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from tests.公用 import 项目根, 自带素材
 if not os.environ.get("DISPLAY") and os.name != "nt":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 应用 = QApplication.instance() or QApplication([])
@@ -158,6 +160,42 @@ class 界面接线测试(unittest.TestCase):
             应用.processEvents()
         self.assertGreaterEqual(self.窗口.堆叠.count(), 8,
                                 "播放/媒体库/传输/敏感词/日志/设置/AI + 网盘页 都该在")
+
+    def test_切侧栏不改窗口尺寸(self):
+        """点「🗂 面板」只该显示/隐藏侧栏，**不许把主窗口改大小**。
+
+        用户真机反馈原话："播放页播放时点击面板会GUI窗宽度高度变化到这不是我想要的，
+        多点两次面板还导致窗口崩溃了"。根因：``切换侧栏`` 原来顺手调了 ``重排``，
+        而 ``重排`` = ``按视频比例调整窗口``，里面直接 ``窗口.resize(...)``。
+        """
+        应用 = QApplication.instance() or QApplication([])
+        self.窗口.resize(1280, 820)
+        self.窗口.show()
+        for _ in range(8):
+            应用.processEvents()
+        页 = self.窗口.播放页面()
+        self.窗口.切换到播放页()          # 用户就是这么用的：在播放页点面板
+        for _ in range(6):
+            应用.processEvents()
+        前尺寸 = (self.窗口.width(), self.窗口.height())
+        for 第 in range(6):                      # "多点两次"：连点 6 次
+            页.切换侧栏(第 % 2 == 0)
+            for _ in range(6):
+                应用.processEvents()
+                QTimer.singleShot(0, lambda: None)
+            time.sleep(0.12)
+        后尺寸 = (self.窗口.width(), self.窗口.height())
+        self.assertEqual(后尺寸, 前尺寸,
+                         f"连点 6 次面板后窗口尺寸不许变：{前尺寸} → {后尺寸}")
+        # 侧栏真的能开关（不是"因为啥都没做所以尺寸没变"）。
+        # ⚠️ 用 isHidden() 而不是 isVisible()：这个页面此刻不一定在堆叠的当前页上，
+        #    祖先被隐藏时 isVisible() 恒为 False —— 拿它断言会假红（实测踩到）。
+        页.切换侧栏(False)
+        应用.processEvents()
+        self.assertTrue(页.右栏.isHidden(), "隐藏时侧栏该是 hidden")
+        页.切换侧栏(True)
+        应用.processEvents()
+        self.assertFalse(页.右栏.isHidden(), "显示时侧栏不该是 hidden")
 
     def test_播放页用的是V2内核(self):
         from wangpan.ui.播放会话 import 播放会话

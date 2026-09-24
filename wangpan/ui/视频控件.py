@@ -27,6 +27,9 @@ class 视频控件(QWidget):
 
     双击 = Signal()
     单击 = Signal()
+    #: 视频区尺寸变了（宽, 高）。页面据此告诉引擎"只需要这么大"。
+    #: 有了它，切换侧栏/拖窗口都不必再去 resize **主窗口**。
+    尺寸变了 = Signal(int, int)
 
     def __init__(self, 父=None) -> None:
         super().__init__(父)
@@ -78,7 +81,13 @@ class 视频控件(QWidget):
     # ---------------- 绘制 ----------------
 
     def 目标矩形(self) -> QRect:
-        """把画面按比例放进控件（居中，留黑边）。"""
+        """把画面按比例放进控件（保持比例，**贴左上角**，多余的地方留黑）。
+
+        为什么是左上角而不是居中（这是用户真机使用后明确要求的）：
+        居中时窗口一变宽高，画面就跟着左右/上下"跳"——黑边一左一右地变，
+        看起来像画面没对齐播放器；贴左上角后画面稳稳待在播放器左上角，
+        多余的像素只在右边/下边变成黑边，窗口怎么拖画面都不动。
+        """
         区域 = self.rect()
         if self._图 is None or self._图.isNull():
             return 区域
@@ -88,7 +97,7 @@ class 视频控件(QWidget):
         缩放 = min(区域.width() / 图宽, 区域.height() / 图高)
         宽 = max(1, int(图宽 * 缩放))
         高 = max(1, int(图高 * 缩放))
-        return QRect((区域.width() - 宽) // 2, (区域.height() - 高) // 2, 宽, 高)
+        return QRect(0, 0, 宽, 高)
 
     def paintEvent(self, _事件):  # noqa: N802 - Qt 命名
         画 = QPainter(self)
@@ -139,6 +148,14 @@ class 视频控件(QWidget):
             return
 
     # ---------------- 交互 ----------------
+
+    def resizeEvent(self, 事件):  # noqa: N802 - Qt 命名
+        超级 = getattr(super(), "resizeEvent", None)
+        if 超级 is not None:
+            超级(事件)
+        尺寸 = self.size()
+        if 尺寸.width() > 0 and 尺寸.height() > 0:
+            self.尺寸变了.emit(int(尺寸.width()), int(尺寸.height()))
 
     def mouseDoubleClickEvent(self, _事件):  # noqa: N802
         self.双击.emit()

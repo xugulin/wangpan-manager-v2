@@ -126,6 +126,58 @@ class 倍速与逐帧测试(unittest.TestCase):
         self.assertGreater(引擎.统计.已解视频帧, 前, "逐帧要真的前进一帧")
 
 
+class 播放中改输出尺寸测试(unittest.TestCase):
+    """播放中反复改"解码输出尺寸"不许崩 —— 这是用户真机崩溃场景的回归。
+
+    为什么会有这个测试：界面在**窗口 resize** 时会调 ``设置输出尺寸``（省掉每帧
+    搬 25 MB 的拷贝）。原实现在界面线程里当场 ``sws_freeContext`` 并清零目标尺寸，
+    而解码线程正在 ``取帧`` 里用它们 → use-after-free / 越界写。
+    复现脚本（播放中每 2ms 改一次随机尺寸）改前 3/3 必崩、改后 3/3 存活。
+    这里做成常驻用例：**崩了就是测试进程死掉**，CI 一定会红。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not 有ffmpeg():
+            raise unittest.SkipTest("本机没有 ffmpeg，造不出素材")
+        cls.临时 = 临时目录()
+        cls.素材 = Path(cls.临时.name) / "长一点.mp4"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.临时.cleanup()
+
+    def test_猛改尺寸不崩(self):
+        import os
+        import random
+        import subprocess
+        if not self.素材.is_file():
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                            "-i", "testsrc2=size=320x180:rate=25:duration=6",
+                            "-c:v", "libx264", "-preset", "ultrafast",
+                            "-pix_fmt", "yuv420p", str(self.素材)],
+                           capture_output=True, timeout=180, check=False)
+        if not self.素材.is_file():
+            self.skipTest("素材没造出来")
+        引擎 = 播放引擎()
+        self.addCleanup(引擎.停止)
+        引擎.打开(str(self.素材))
+        引擎.播放()
+        time.sleep(0.5)
+        开始 = time.time()
+        次数 = 0
+        while time.time() - 开始 < 1.5:
+            引擎.设置输出尺寸(random.randint(1, 2000), random.randint(1, 1200))
+            次数 += 1
+            time.sleep(0.002)
+        self.assertGreater(次数, 100, "这一段要真的改很多次才有意义")
+        # 关键：进程还活着、解码线程还在出帧
+        帧前 = 引擎.取帧序号()
+        time.sleep(0.4)
+        self.assertGreater(引擎.取帧序号(), 帧前,
+                           f"改了 {次数} 次输出尺寸后解码还得继续出帧（不许崩/卡死）")
+
+
 if __name__ == "__main__":
     unittest.main()
 

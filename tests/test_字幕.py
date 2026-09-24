@@ -551,5 +551,61 @@ class 视频控件字幕测试(unittest.TestCase):
         self.assertEqual(_亮像素(控件.grab().toImage()), 0, "摘掉轨道后不该再画字幕")
 
 
+class 画面摆放测试(unittest.TestCase):
+    """画面的摆法：**贴左上角**、保持比例、只多不少。
+
+    这一条来自用户真机使用反馈："GUI窗口变化时视频的左上角没有在播放页播放器的
+    左上角对齐"。原来画面是**居中**摆的 —— 窗口一变宽窄，左右黑边就跟着变，
+    画面看着像在"跳"。改成贴左上角后，多余的地方只在右边/下边变黑。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _取应用()
+
+    def _控件(self, 控件宽, 控件高, 图宽=320, 图高=180):
+        from wangpan.ui.视频控件 import 视频控件
+        控件 = 视频控件()
+        控件.resize(控件宽, 控件高)
+        控件.设置帧(QImage(图宽, 图高, QImage.Format.Format_RGB32))
+        return 控件
+
+    def test_贴左上角(self):
+        控件 = self._控件(800, 600)          # 比 16:9 更方 → 左右会留黑边
+        区 = 控件.目标矩形()
+        self.assertEqual((区.x(), 区.y()), (0, 0),
+                         f"画面左上角必须贴在控件左上角，实际 {区}")
+        self.assertEqual(区.width(), 800, "宽先顶满（4:3 控件里 16:9 画面按宽贴边）")
+        self.assertEqual(区.height(), 450)
+
+    def test_上下留黑边时也贴左上角(self):
+        控件 = self._控件(1200, 400)         # 很扁的控件 → 上下留黑边
+        区 = 控件.目标矩形()
+        self.assertEqual((区.x(), 区.y()), (0, 0), f"仍然要贴左上角，实际 {区}")
+        self.assertEqual(区.height(), 400)
+        self.assertEqual(区.width(), int(320 * (400 / 180)))
+
+    def test_窗口变宽画面不动(self):
+        """窗口变宽时，画面左上角必须**不动**（这是用户要的"不跳"）。"""
+        窄 = self._控件(640, 360).目标矩形()
+        宽 = self._控件(1280, 360).目标矩形()
+        self.assertEqual((窄.x(), 窄.y()), (宽.x(), 宽.y()),
+                         "窗口变宽不该让画面位移")
+
+    def test_尺寸变化会上报(self):
+        """控件尺寸变了要发信号 —— 页面据此同步引擎输出尺寸（不再去 resize 窗口）。"""
+        控件 = self._控件(640, 360)
+        收到 = []
+        控件.尺寸变了.connect(lambda w, h: 收到.append((w, h)))
+        # ⚠️ 隐藏的控件 resize 不一定投递事件（Qt 会把几何改动攒着），
+        #    所以这里先 show() ——真实使用中控件当然是显示着的。
+        控件.show()
+        _取应用().processEvents()
+        控件.resize(900, 500)
+        _取应用().processEvents()
+        self.assertTrue(收到, "resize 之后必须发出 尺寸变了")
+        self.assertEqual(收到[-1], (900, 500))
+
+
 if __name__ == "__main__":
     unittest.main()
