@@ -39,6 +39,16 @@ from .定时 import 安全单发
 from .播放清单 import 播放清单, 播放项
 from .路径选择对话框 import 路径选择对话框
 from .vlc风格 import 构建菜单栏
+from .悬浮面板 import 悬浮面板窗口
+
+#: 悬浮面板的宽度范围（原来钉在 splitter 里时的 260~460，现在可稍宽一点）
+最小面板宽 = 260
+最大面板宽 = 520
+#: 第一次进播放页是否自动把悬浮面板摆出来。
+#: **默认不摆**：面板是独立窗口，一进播放页就弹一个窗太打扰，而且真机实测
+#: 它在启动阶段抢过一次焦点（键盘快捷键一度全进不去）。要就点「🗂 面板」
+#: 或按 Ctrl+Shift+P —— 那个勾选框的状态与"没摆出来"也是一致的。
+初始显示面板 = False
 
 
 def 项目根目录() -> Path:
@@ -173,21 +183,24 @@ class 播放页面(QWidget):
         self.内核页.标题变了.connect(lambda 名: self.状态标签.setText(f"🎬 {名}"))
         self.内核页.播放状态变了.connect(self._播放状态变了)
 
+        # ---- 面板不再钉在右侧：它是个**独立悬浮窗口**（用户要求），
+        #      所以主体里只有画面 + 控制条，画面能吃满主窗口宽度。----
         self.左面板 = QTabWidget()
-        self.左面板.setMinimumWidth(260)
-        self.左面板.setMaximumWidth(460)
+        self.左面板.setMinimumWidth(最小面板宽)
+        self.左面板.setMaximumWidth(最大面板宽)
         self._建信息面板()
         self.清单 = 播放清单(self.左面板)
         self.清单.请求播放.connect(self._清单选了某项)
         self.左面板.addTab(self.清单, "📋 播放清单")
         self.左面板.addTab(self._建AI面板(), "🤖 AI 助手")
-        self.左面板.currentChanged.connect(lambda _i: 安全单发(self, 60, self.重排))
+        # ⚠️ 原先这里接了 `currentChanged → 安全单发(self, 60, self.重排)`，
+        #    而 `重排` = `按视频比例调整窗口`，里面 `窗口.resize(...)` ——
+        #    也就是说**在面板里换个标签页都会把主窗口改大小**（和"点面板窗口变形"
+        #    是同一个 bug，只是入口不同）。现在面板是独立窗口，更不该动主窗口。
+        self._面板窗口: 悬浮面板窗口 | None = None
 
         主体.addWidget(self.内核页)
-        主体.addWidget(self.左面板)
         主体.setStretchFactor(0, 1)
-        主体.setStretchFactor(1, 0)
-        主体.setSizes([900, 320])
         self.主体 = 主体
         布局.addWidget(主体, 1)
 
@@ -302,6 +315,10 @@ class 播放页面(QWidget):
             "AI诊断": self._手动诊断,
             "流畅优先": self.流畅优先,
             "用VLC自带窗口": self.用VLC自带窗口播放,
+            # 独立窗口：整合后**一直没有界面入口**（方法在、菜单里没有），
+            # 用户要"独立窗口播放时适应各种屏幕"，先得能打开它。
+            "独立窗口": self.打开独立窗口,
+            "收回独立窗口": self._收回独立窗口,
             "适应视频比例": self.按视频比例调整窗口,
             "切换自动调优": lambda 选中: self.自动调优框.setChecked(bool(选中)),
             "AI翻译字幕": self._AI翻译字幕,
@@ -817,9 +834,9 @@ class 播放页面(QWidget):
         """
         目标 = bool(显示)
         if 目标:
-            self.右栏.show()
-        else:
-            self.右栏.hide()
+            self._显示面板窗口()
+        elif self._面板窗口 is not None:
+            self._面板窗口.隐藏()
         动作 = getattr(getattr(self, "菜单栏", None), "侧栏动作", None)
         if 动作 is not None:
             try:
@@ -832,6 +849,58 @@ class 播放页面(QWidget):
             self._写日志(f"[播放] 侧栏：{'显示' if 目标 else '隐藏'}")
         except Exception:  # noqa: BLE001
             pass
+
+    def _显示面板窗口(self) -> None:
+        """把「视频信息 / 播放清单 / AI 助手」显示成独立悬浮窗口。"""
+        if self._面板窗口 is None:
+            try:
+                主 = self.window()
+                self._面板窗口 = 悬浮面板窗口(self.左面板, 主窗口=主)
+            except Exception as 错:  # noqa: BLE001
+                # 起不来就退回"钉在页面里"的老行为，别让用户连面板都看不到
+                self._面板窗口 = None
+                try:
+                    self.主体.addWidget(self.左面板)
+                    self.左面板.show()
+                    self._写日志(f"[播放] 面板窗口起不来，改回内嵌：{错}")
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+        self._面板窗口.显示()
+
+    @property
+    def 面板是独立窗口(self) -> bool:
+        return self._面板窗口 is not None
+
+    def 面板可见(self) -> bool:
+        """面板现在看不看得见（独立窗口与内嵌两种情况都算）。"""
+        if self._面板窗口 is not None:
+            return bool(self._面板窗口.isVisible())
+        return bool(self.左面板.isVisible())
+
+    def 收尾面板(self) -> None:
+        """退出前把悬浮面板关掉（不然会留下一个没爹的小窗挂着）。"""
+        if self._面板窗口 is not None:
+            try:
+                self._面板窗口.收尾()
+            except Exception:  # noqa: BLE001
+                pass
+            self._面板窗口 = None
+
+    def showEvent(self, 事件):  # noqa: N802 - Qt 命名
+        """第一次显示本页时把悬浮面板摆出来。
+
+        为什么不是一开始就显示：面板现在是**独立窗口**，程序一启动就多弹一个窗
+        太打扰；但也不能一直不给 —— 用户原来一进播放页就能看到「播放清单」，
+        所以第一次进这一页时自动摆出来，之后完全听用户的（那个勾选框说了算）。
+        """
+        超级 = getattr(super(), "showEvent", None)
+        if 超级 is not None:
+            超级(事件)
+        if not getattr(self, "_面板初判过", False):
+            self._面板初判过 = True
+            if 初始显示面板:
+                self.切换侧栏(True)
 
     def 自适应宽度(self, 宽: int) -> None:
         """主窗口变窄时把侧栏收起来（小屏才看得全画面）。"""
@@ -943,6 +1012,23 @@ class 播放页面(QWidget):
         if 窗口 is not None and 窗口 is self._独立窗口:
             self._独立窗口 = None
         self._显示媒体信息()
+        self.状态标签.setText("↩️ 已收回主窗口播放")
+
+    def _收回独立窗口(self) -> None:
+        """菜单项「把独立窗口收回主界面」：**真的**关掉那个窗口。
+
+        ⚠️ 不能直接接 ``收回播放到页面``：那个方法是"独立窗口被关之后"的**回调**，
+        不传参时它只更新状态、不会去关窗口 —— 菜单点了会没反应（实测踩到）。
+        """
+        窗口 = self._独立窗口
+        if 窗口 is None:
+            self.状态标签.setText("ℹ️ 现在没有独立窗口")
+            return
+        try:
+            窗口.关闭()          # 关闭时会回调 收回播放到页面（画面回主窗口）
+        except Exception as 错:  # noqa: BLE001
+            self._AI写(f"[播放] 收回独立窗口失败：{错}")
+        self._独立窗口 = None
         self.状态标签.setText("↩️ 已收回主窗口播放")
 
     def 用VLC自带窗口播放(self) -> None:
@@ -1142,7 +1228,8 @@ class 播放页面(QWidget):
     # ==================== 收尾 ====================
 
     def 关闭(self) -> None:
-        """关页收尾：停定时器、关独立窗口、关内核页与会话。"""
+        """关页收尾：停定时器、关独立窗口与悬浮面板、关内核页与会话。"""
+        self.收尾面板()
         try:
             self.定时器.stop()
         except Exception:  # noqa: BLE001

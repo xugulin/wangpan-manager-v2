@@ -34,10 +34,17 @@ class 媒体库页(QWidget):
 
     def __init__(self, 父: Optional[QWidget] = None, *,
                  日志回调: Optional[Callable[[str], None]] = None,
-                 提示回调: Optional[Callable[[str], None]] = None) -> None:
+                 提示回调: Optional[Callable[[str], None]] = None,
+                 选网盘文件夹: Optional[Callable[[], Optional[dict]]] = None,
+                 列网盘目录: Optional[Callable[[str, str], list]] = None) -> None:
         super().__init__(父)
         self._外部日志 = 日志回调
         self._外部提示 = 提示回调
+        #: 网盘能力由界面层注入（wangpan 里不许 import v8_3，见 媒体库来源.py 的说明）
+        self._选网盘文件夹 = 选网盘文件夹
+        self._列网盘目录 = 列网盘目录
+        #: 这一轮扫描里"网盘文件"的待刮削单元（刮削服务用它，不必碰本地磁盘）
+        self._远端单元: dict = {}
         #: 刮削跑完如果留下"待确认"，自动把队列摆到人面前（测试可关掉）
         self.自动开队列 = True
         self._刮削线程: Optional[QThread] = None
@@ -46,11 +53,15 @@ class 媒体库页(QWidget):
         self.资料库 = None
         self.图片缓存 = None
         self.海报墙 = None
+        #: 多个媒体库文件夹（含网盘）的清单
+        from .媒体库来源 import 来源清单 as _来源清单
+        self.来源清单 = _来源清单()
         布局 = QVBoxLayout(self)
         布局.setContentsMargins(0, 0, 0, 0)
         try:
             from ..scrape.库 import 资料库
             from ..scrape.图片 import 图片缓存
+            from .媒体库来源 import 来源清单
             from .海报墙页 import 海报墙页
             self.资料库 = 资料库()
             self.图片缓存 = 图片缓存()
@@ -60,6 +71,7 @@ class 媒体库页(QWidget):
             self.海报墙.要刮削.connect(self.刮削路径)
             self.海报墙.要手动匹配.connect(self.开手动匹配)
             self.海报墙.要处理待确认.connect(self.开待确认队列)
+            self.海报墙.要管理文件夹.connect(self.管理文件夹)
             self.海报墙.状态变化.connect(self._提示)
         except Exception as 错:  # noqa: BLE001
             self.资料库 = None
@@ -92,6 +104,48 @@ class 媒体库页(QWidget):
         if self.海报墙 is not None:
             self.海报墙.刷新()
 
+    # ------------------------------------------------------ 媒体库文件夹（多个）
+
+    def 管理文件夹(self) -> None:
+        """打开「媒体库文件夹」对话框（加/删文件夹，含网盘内的）。"""
+        from .媒体库文件夹对话框 import 媒体库文件夹对话框
+        框 = 媒体库文件夹对话框(
+            self.来源清单, self,
+            选网盘文件夹=self._选网盘文件夹,
+            要扫描全部=self.扫描全部来源,
+            日志=self._写日志)
+        框.exec()
+
+    def 扫描全部来源(self, 完成后: Optional[Callable[[], None]] = None) -> None:
+        """把清单里的**所有**文件夹扫一遍：本地走 os.walk，网盘走递归列目录。"""
+        from .媒体库来源 import 远端视频们
+        全部 = self.来源清单.全部()
+        if not 全部:
+            self._提示("🎞 还没有媒体库文件夹：先点「📂 媒体库文件夹…」加一个")
+            return
+        本地目录们 = [x.路径 for x in 全部 if x.类型 == "本地"]
+        远端单元们: list = []
+        for 项 in 全部:
+            if 项.类型 != "网盘":
+                continue
+            if not callable(self._列网盘目录):
+                self._写日志(f"[媒体库] 没有接上网盘列目录，跳过 {项.路径}")
+                continue
+            self._写日志(f"[媒体库] 正在列网盘目录：{项.网盘}:{项.路径}")
+            文件们 = 远端视频们(项.网盘, 项.路径, self._列网盘目录,
+                          进度=self._写日志)
+            self._写日志(f"[媒体库] {项.网盘}:{项.路径} 找到 {len(文件们)} 个视频")
+            from ..scrape.扫描 import 造远端单元
+            远端单元们 += 造远端单元(项.网盘, 项.路径, 文件们)
+        if not 本地目录们 and not 远端单元们:
+            self._提示("🎞 清单里的文件夹都没扫出内容（检查路径/网盘登录）")
+            return
+        self._远端单元 = {str(u.路径): u for u in 远端单元们}
+        self._提示(f"🎞 开始扫描 {len(本地目录们)} 个本地文件夹 + "
+                 f"{len(远端单元们)} 个网盘视频…")
+        self.刮削路径("", 完成后=完成后, 本地目录们=本地目录们,
+                   远端单元们=远端单元们)
+
     # ------------------------------------------------------------------ 刮削
 
     def 建TMDB客户端(self):
@@ -106,7 +160,9 @@ class 媒体库页(QWidget):
             return None
 
     def 刮削路径(self, 路径: str, 强制标识: str = "",
-               强制类型=None, 完成后: Optional[Callable[[], None]] = None) -> None:
+               强制类型=None, 完成后: Optional[Callable[[], None]] = None,
+               本地目录们: Optional[list] = None,
+               远端单元们: Optional[list] = None) -> None:
         """刮一个目录/文件：在**后台线程**里跑，界面只显示进度。
 
         为什么要线程 + 进度框：刮削要联网、要下图，几秒钟到几分钟都有可能；
@@ -139,11 +195,18 @@ class 媒体库页(QWidget):
                 try:
                     库 = 资料库()
                     缓存 = 图片缓存()
+                    单元表 = {str(u.路径): u for u in (远端单元们 or [])}
                     服务 = 刮削服务(
                         库, 客户端, 缓存, 刮削设置(),
                         进度回调=lambda p: 结果盒.setdefault("进度", p.摘要()),
-                        日志回调=日志回调)
-                    服务.扫库([路径])
+                        日志回调=日志回调,
+                        远端单元=单元表)
+                    if 本地目录们:
+                        服务.扫库(list(本地目录们))
+                    elif 路径:
+                        服务.扫库([路径])
+                    if 远端单元们:
+                        服务.记远端单元(远端单元们)
                     if 强制标识:
                         结果盒["结果"] = 服务.刮路径(路径, 强制标识, 强制类型)
                     else:

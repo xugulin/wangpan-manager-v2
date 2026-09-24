@@ -418,6 +418,8 @@ class 海报墙页(QWidget):
     要手动匹配 = Signal(int)
     #: 工具条上的「✅ 待确认 N」被点了（主窗口去开待确认队列那一屏）
     要处理待确认 = Signal()
+    #: 打开「媒体库文件夹」管理框（可加**多个**文件夹，含网盘内的）
+    要管理文件夹 = Signal()
 
     def __init__(self, 库: 资料库, 图片缓存, 父=None,
                  页大小: int = 默认页大小,
@@ -568,9 +570,15 @@ class 海报墙页(QWidget):
         self.刷新按钮.clicked.connect(self.刷新)
         行.addWidget(self.刷新按钮)
         self.扫描按钮 = QPushButton("📁 扫描媒体库…")
-        self.扫描按钮.setToolTip("选一个目录，交给刮削流程（本页只负责把目录发出去）")
+        self.扫描按钮.setToolTip("选**一个**目录立刻扫（临时用；要长期扫多个目录见右边那个按钮）")
         self.扫描按钮.clicked.connect(self.选目录扫描)
         行.addWidget(self.扫描按钮)
+        # 用户要求：媒体库要能加**多个**文件夹、还要能加网盘里的文件夹，
+        # 所以单目录的「扫描媒体库…」旁边再给一个清单管理入口。
+        self.文件夹按钮 = QPushButton("📂 媒体库文件夹…")
+        self.文件夹按钮.setToolTip("管理要长期扫描的文件夹：可加多个，本地和网盘都行")
+        self.文件夹按钮.clicked.connect(self.要管理文件夹.emit)
+        行.addWidget(self.文件夹按钮)
         self.待确认数 = 0
         self.待确认按钮 = QPushButton("✅ 待确认")
         self.待确认按钮.setToolTip("自动匹配拿不准的条目会进这个队列（现在是空的）")

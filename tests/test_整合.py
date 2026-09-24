@@ -23,6 +23,7 @@ if not os.environ.get("DISPLAY") and os.name != "nt":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 应用 = QApplication.instance() or QApplication([])
@@ -188,14 +189,28 @@ class 界面接线测试(unittest.TestCase):
         self.assertEqual(后尺寸, 前尺寸,
                          f"连点 6 次面板后窗口尺寸不许变：{前尺寸} → {后尺寸}")
         # 侧栏真的能开关（不是"因为啥都没做所以尺寸没变"）。
-        # ⚠️ 用 isHidden() 而不是 isVisible()：这个页面此刻不一定在堆叠的当前页上，
-        #    祖先被隐藏时 isVisible() 恒为 False —— 拿它断言会假红（实测踩到）。
+        # ⚠️ 面板现在是**独立悬浮窗口**（用户要求），所以判"可见"要用
+        #    `页.面板可见()` —— 它自己知道该看窗口还是看内嵌标签页；
+        #    直接看 `右栏.isHidden()` 会假红（面板窗口隐藏时标签页并没被 hide）。
         页.切换侧栏(False)
         应用.processEvents()
-        self.assertTrue(页.右栏.isHidden(), "隐藏时侧栏该是 hidden")
+        self.assertFalse(页.面板可见(), "隐藏后面板该看不见")
         页.切换侧栏(True)
         应用.processEvents()
-        self.assertFalse(页.右栏.isHidden(), "显示时侧栏不该是 hidden")
+        self.assertTrue(页.面板可见(), "显示后面板该看得见")
+        self.assertTrue(页.面板是独立窗口, "面板必须是独立悬浮窗口（用户要求）")
+        面板窗 = 页._面板窗口
+        self.assertIsNotNone(面板窗)
+        # 高度要跟主窗口一致；**屏幕装不下时按屏幕收**（"不要超出屏幕"也是用户要求）。
+        屏幕 = (self.窗口.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+        期望 = min(self.窗口.frameGeometry().height(), 屏幕.height())
+        self.assertLessEqual(abs(面板窗.height() - 期望), 2,
+                             f"面板高度该是 min(主窗口高, 屏幕高)"
+                             f"：实际 {面板窗.height()}，期望 {期望}"
+                             f"（主窗口 {self.窗口.frameGeometry().height()}、"
+                             f"屏幕 {屏幕.height()}）")
+        self.assertLessEqual(面板窗.geometry().bottom(), 屏幕.bottom() + 1,
+                             "面板不许超出屏幕下边缘")
 
     def test_播放页用的是V2内核(self):
         from wangpan.ui.播放会话 import 播放会话

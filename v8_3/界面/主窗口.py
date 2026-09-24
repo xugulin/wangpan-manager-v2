@@ -856,6 +856,67 @@ class 主窗口(QMainWindow):
         self.追加日志(f"🎬 播放：{远端路径}"
                   + ("（独立窗口）" if 独立窗口 else ""))
 
+    # ---------------- 媒体库要用的网盘能力（wangpan 侧只认回调，不 import v8_3）----------------
+
+    def _已知网盘标识(self) -> list[str]:
+        try:
+            return [str(x.get("标识") or "") for x in self.配置.get("适配器") or []]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def 列网盘目录(self, 网盘标识: str, 远端路径: str) -> list:
+        """给媒体库扫网盘文件夹用：列一个网盘目录，返回统一格式的条目表。"""
+        适配器 = self.动作.适配器(str(网盘标识))
+        条目们 = 适配器.列目录(str(远端路径 or "/")) or []
+        结果 = []
+        for 条 in 条目们:
+            转 = getattr(条, "to_dict", None)
+            结果.append(转() if callable(转) else dict(条))
+        return 结果
+
+    def 选网盘媒体文件夹(self):
+        """给媒体库用：弹网盘路径选择框挑一个**文件夹**，返回 {网盘, 路径, 显示名}。"""
+        from .路径选择对话框 import 路径选择对话框
+        规格表 = dict(getattr(self.动作, "规格表", {}) or {})
+        if not 规格表:
+            self.状态消息("⚠️ 还没有配置网盘：先到「网盘」页加一个")
+            return None
+        首个 = next(iter(规格表))
+        初始 = "/"
+        try:
+            适配器 = self.动作.适配器(首个)
+        except Exception as 错:  # noqa: BLE001
+            self.状态消息(f"❌ 适配器不可用：{错}")
+            return None
+        框 = 路径选择对话框(
+            适配器, 首个, 初始路径=初始,
+            允许选择文件=False,          # 这一步是挑**文件夹**
+            允许新建=False,
+            标题="选择网盘里的媒体文件夹",
+            说明="双击进入文件夹；进到想扫的那一层后点「确定」。",
+            只要文件=False,
+            父窗口=self,
+            网盘列表=规格表,
+            取适配器=self.动作.适配器)
+        from PySide6.QtWidgets import QDialog
+        if 框.exec() != QDialog.DialogCode.Accepted:
+            return None
+        # 对话框的对外结果字段（与播放页挑视频用的是同一套）
+        标识 = str(getattr(框, "选中网盘标识", "") or 框.标识 or 首个)
+        路径 = str(getattr(框, "选中路径", "") or 框.当前路径 or "/")
+        规格 = 规格表.get(标识)
+        return {"网盘": 标识, "路径": 路径,
+                "显示名": str(getattr(规格, "显示名", "") or 标识)}
+
+    def 播放媒体库条目(self, 路径: str) -> None:
+        """媒体库海报墙点「播放」：本地路径直接播，``标识:远端路径`` 走网盘。"""
+        from wangpan.ui.媒体库来源 import 拆库路径
+        标识, 远端 = 拆库路径(str(路径), self._已知网盘标识())
+        if 标识:
+            self.播放网盘视频(标识, 远端)
+        else:
+            self.播放本地视频(str(路径))
+
     def 播放本地视频(self, 路径: str) -> None:
         """本地文件直接播（媒体库海报墙点「播放」走这条）。"""
         self.切换到播放页()
@@ -873,8 +934,10 @@ class 主窗口(QMainWindow):
         if self._媒体库页面 is None:
             from wangpan.ui.媒体库页 import 媒体库页
             页 = 媒体库页(self, 日志回调=self.追加日志,
-                       提示回调=lambda 文本: self.状态消息(文本))
-            页.要播放.connect(self.播放本地视频)
+                       提示回调=lambda 文本: self.状态消息(文本),
+                       选网盘文件夹=self.选网盘媒体文件夹,
+                       列网盘目录=self.列网盘目录)
+            页.要播放.connect(self.播放媒体库条目)
             self._媒体库页面 = 页
             self.堆叠.addWidget(self._放进堆叠(页))
         self._切到(self._媒体库页面)

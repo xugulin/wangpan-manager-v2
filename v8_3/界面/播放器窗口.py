@@ -71,6 +71,7 @@ class 播放器窗口(QWidget):
         self._隐藏定时器.setSingleShot(True)
         self._隐藏定时器.setInterval(自动隐藏毫秒)
         self._隐藏定时器.timeout.connect(self.隐藏控件)
+        self._正在收回 = False
         self._自适应屏幕()
         self._构建()
         if self._内核页 is not None:
@@ -87,15 +88,94 @@ class 播放器窗口(QWidget):
 
     # ------------------------------------------------------------------ 构建
 
+    def _所在屏幕(self):
+        """当前该按哪块屏幕算：**鼠标在哪块屏幕就用哪块**。
+
+        为什么要这样（用户要求"适应各种大小不同的屏幕，不要超出屏幕"）：
+        原来写死 `primaryScreen()` —— 双屏且主屏小、副屏大（或反过来）时，
+        窗口开出来就可能一大半在屏幕外，或者明明副屏更大却按小屏算。
+        鼠标所在屏幕才是用户"想让它开在哪儿"的意图。
+        """
+        try:
+            from PySide6.QtGui import QCursor
+            屏幕 = QGuiApplication.screenAt(QCursor.pos())
+            if 屏幕 is not None:
+                return 屏幕
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self.screen() is not None:
+                return self.screen()
+        except Exception:  # noqa: BLE001
+            pass
+        return QGuiApplication.primaryScreen()
+
     def _自适应屏幕(self) -> None:
         try:
-            屏幕 = QGuiApplication.primaryScreen()
+            屏幕 = self._所在屏幕()
             区域 = 屏幕.availableGeometry()
             宽 = int(区域.width() * 初始占比)
             高 = int(区域.height() * 初始占比)
         except Exception:  # noqa: BLE001
-            宽, 高 = 960, 600
+            区域, 宽, 高 = None, 960, 600
         self.resize(max(360, 宽), max(380, 高))
+        self.收回屏幕内()
+
+    def 收回屏幕内(self) -> None:
+        """把窗口**收进**屏幕可用区域：既不许超出，也不许整块跑到屏幕外。
+
+        为什么单独有这个：Qt 的 `resize()` 不管你屏幕多大，而用户明确要求
+        "不要超出屏幕"。这里同时处理两件事：
+        * **尺寸**：宽高各按屏幕可用区域收一次（留一点点边距，别顶着边缘）；
+        * **位置**：收完之后如果窗口有一部分在屏幕外，往回挪；
+          如果窗口比屏幕还大（比如从大屏搬到小屏），先缩到屏幕大小再挪。
+        """
+        if self.isFullScreen():
+            return                              # 全屏是用户主动要的，别去动它
+        try:
+            屏幕 = self._所在屏幕()
+            区域 = 屏幕.availableGeometry()
+        except Exception:  # noqa: BLE001
+            return
+        # ⚠️ 必须把**窗口边框/标题栏**也算进去：`width()` 是客户区，
+        #    `frameGeometry()` 才是屏幕上真正占的地方（实测离屏下边框 4px，
+        #    只按客户区收会"看起来收住了、实际还超出 4px"）。
+        try:
+            装饰宽 = max(0, self.frameGeometry().width() - self.width())
+            装饰高 = max(0, self.frameGeometry().height() - self.height())
+        except Exception:  # noqa: BLE001
+            装饰宽 = 装饰高 = 0
+        宽 = min(self.width(), max(240, 区域.width() - 装饰宽))
+        高 = min(self.height(), max(200, 区域.height() - 装饰高))
+        if (宽, 高) != (self.width(), self.height()):
+            self.resize(int(宽), int(高))
+        try:
+            角 = self.frameGeometry()
+        except Exception:  # noqa: BLE001
+            return
+        x = 角.x()
+        y = 角.y()
+        if x + 宽 > 区域.x() + 区域.width():
+            x = 区域.x() + 区域.width() - 宽
+        if y + 高 > 区域.y() + 区域.height():
+            y = 区域.y() + 区域.height() - 高
+        x = max(区域.x(), x)
+        y = max(区域.y(), y)
+        if (x, y) != (角.x(), 角.y()):
+            self.move(int(x), int(y))
+
+    def resizeEvent(self, 事件):  # noqa: N802 - Qt 命名
+        """窗口尺寸一变就保证它还在屏幕内（用户要求：不要超出屏幕）。"""
+        超级 = getattr(super(), "resizeEvent", None)
+        if 超级 is not None:
+            超级(事件)
+        if getattr(self, "_正在收回", False):
+            return
+        self._正在收回 = True
+        try:
+            self.收回屏幕内()
+        finally:
+            self._正在收回 = False
 
     def _构建(self) -> None:
         布局 = QVBoxLayout(self)
@@ -414,11 +494,31 @@ class 播放器窗口(QWidget):
         self._自适应屏幕()
 
     def 适应视频比例(self) -> None:
+        """按视频比例调整窗口，但**一律收进当前屏幕**。
+
+        先按屏幕可用高度的 86% 反推宽度（比"拿当前宽度乘 0.9"更靠谱：
+        窗口本来就在屏幕内时，这样算出来的高宽都不会超屏），再收一次边。
+        """
         比例 = self.视频比例()
         if 比例 <= 0:
             return
-        目标宽 = int(self.width() * 0.9)
-        self.resize(max(360, 目标宽), max(300, int(目标宽 / 比例) + 90))
+        try:
+            区域 = self._所在屏幕().availableGeometry()
+        except Exception:  # noqa: BLE001
+            区域 = None
+        装饰高 = max(0, self.height() - self.画面区.height())
+        if 区域 is not None:
+            可用高 = max(240, int(区域.height() * 0.86) - 装饰高)
+            可用宽 = int(区域.width() * 0.94)
+        else:
+            可用高, 可用宽 = max(240, self.height() - 装饰高), self.width()
+        目标高 = 可用高
+        目标宽 = int(目标高 * 比例)
+        if 目标宽 > 可用宽:
+            目标宽 = 可用宽
+            目标高 = int(目标宽 / 比例)
+        self.resize(max(360, 目标宽), max(300, 目标高 + 装饰高))
+        self.收回屏幕内()
 
     def 视频比例(self) -> float:
         if self.会话 is None:

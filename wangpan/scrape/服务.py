@@ -114,7 +114,14 @@ class 刮削服务:
     def __init__(self, 库: 资料库, 客户端=None, 缓存: Optional[图片缓存] = None,
                  设置: Optional[刮削设置] = None,
                  进度回调: Optional[Callable[[刮削进度], None]] = None,
-                 日志回调: Optional[Callable[[str], None]] = None) -> None:
+                 日志回调: Optional[Callable[[str], None]] = None,
+                 远端单元: Optional[dict] = None) -> None:
+        #: ``{库里的路径: 发现条目}`` —— **网盘里的**文件用这个喂进来。
+        #: 为什么需要：`_造单元()` 走的是本地文件系统（目录列举、读 nfo/海报），
+        #: 网盘文件夹没有本地路径可走；而刮削真正依赖的只有文件名（TMDB 按名字搜）。
+        #: 界面先把远端目录列出来、造成单元（`扫描.造远端单元`），这里直接用现成的，
+        #: 不再去碰本地磁盘。
+        self.远端单元 = dict(远端单元 or {})
         self.库 = 库
         self.客户端 = 客户端
         self.缓存 = 缓存 or 图片缓存()
@@ -163,6 +170,20 @@ class 刮削服务:
             self.库.记任务(str(单元.路径), "待处理", None,
                        单元.一句话())
         return len(全部), "；".join(摘要们)
+
+    def 记远端单元(self, 单元们) -> tuple[int, str]:
+        """把**网盘**里的待刮削单元登记成任务（不联网、不碰本地文件系统）。
+
+        对应的本地版本是 :meth:`扫库`（它内部 `os.walk` 本地目录）。
+        """
+        登记 = 0
+        for 单元 in 单元们 or []:
+            if not 单元.可刮削():
+                continue
+            self.库.记任务(str(单元.路径), "待处理", None, 单元.一句话())
+            登记 += 1
+        self._日志(f"[刮削] 网盘新增 {登记} 个待刮削单元")
+        return 登记, f"网盘 {登记} 个"
 
     # ---------------- 刮削 ----------------
 
@@ -246,7 +267,7 @@ class 刮削服务:
 
     # ---------------- 单个单元 ----------------
     def _刮一个(self, 路径: Path, 结果: 服务结果) -> None:
-        单元 = self._造单元(路径)
+        单元 = self.远端单元.get(str(路径)) or self._造单元(路径)
         if 单元 is None or not 单元.视频们:
             结果.跳过 += 1
             self.库.记任务(str(路径), "成功", None, "没有可刮削的视频")

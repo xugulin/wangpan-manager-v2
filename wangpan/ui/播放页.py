@@ -31,6 +31,7 @@ from ..player.引擎 import 播放状态
 from ..subtitle import 找同名字幕, 读字幕文件
 from .播放会话 import 播放会话
 from .视频控件 import 视频控件
+from .悬浮预览 import 悬浮预览窗
 
 __all__ = ["播放页", "时间文本"]
 
@@ -79,6 +80,8 @@ class 播放页(QWidget):
         self._帧序号 = -1
         self._拖动中 = False
         self._上次状态 = ""
+        #: 预览小窗现在是不是弹着的（真机测试/自检会看它）
+        self._预览显示中 = False
         self._预览缓存: dict[int, QImage] = {}
         self._缩略图器 = None
         self._预览结果 = None
@@ -127,12 +130,11 @@ class 播放页(QWidget):
         条布局.setContentsMargins(8, 4, 8, 4)
         条布局.setSpacing(4)
 
-        self.预览 = QLabel()
-        self.预览.setFixedHeight(90)
-        self.预览.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.预览.setStyleSheet("background:#111;color:#888;")
-        self.预览.setText("（鼠标停在进度条上可预览画面）")
-        条布局.addWidget(self.预览)
+        # ---- 预览：**不再占一条 90px 高的常驻黑条**（用户嫌它"长又粗影响观看"），
+        #      改成鼠标在进度条上移动时，贴在光标上方弹出的悬浮小窗。----
+        self.预览窗 = 悬浮预览窗(self)
+        #: 兼容老名字：`预览` 现在指的是小窗里那张图（老代码/测试拿它取 pixmap）
+        self.预览 = self.预览窗.图
 
         self._预览定时器 = QTimer(self)
         self._预览定时器.setSingleShot(True)
@@ -298,6 +300,7 @@ class 播放页(QWidget):
         self.视频.清空()
         self._预览缓存 = {}
         self._缩略图器 = None
+        self._收起预览()
         # 媒体信息 / 探测结果：本地文件用内核自带那份就够（不问带宽）
         try:
             会话.媒体 = 会话._内核探测媒体(str(路径), {}, 本地=True,
@@ -751,10 +754,27 @@ class 播放页(QWidget):
     # ------------------------------------------------------------------ 缩略图预览
 
     def eventFilter(self, 对象, 事件):  # noqa: N802 - Qt 命名
-        if 对象 is self.进度 and 事件.type() == 事件.Type.MouseMove:
-            if self.引擎.统计.总时长秒 > 0:
-                self._预览定时器.start()
+        if 对象 is self.进度:
+            if 事件.type() == 事件.Type.MouseMove:
+                if self.引擎.统计.总时长秒 > 0:
+                    self._预览定时器.start()
+            elif 事件.type() in (事件.Type.Leave, 事件.Type.Hide):
+                # 鼠标离开进度条 → 小窗立刻收起（原来那条常驻黑条是永远在的）
+                self._收起预览()
         return super().eventFilter(对象, 事件)
+
+    @property
+    def 预览显示中(self) -> bool:
+        """预览小窗现在弹着没有（自检/真机测试看它）。"""
+        return bool(getattr(self, "_预览显示中", False))
+
+    def _收起预览(self) -> None:
+        self._预览定时器.stop()
+        try:
+            self.预览窗.收起()
+        except Exception:  # noqa: BLE001
+            pass
+        self._预览显示中 = False
 
     def _要预览(self, _值: int) -> None:
         if self.引擎.统计.总时长秒 > 0:
@@ -765,6 +785,7 @@ class 播放页(QWidget):
 
     def _结束拖(self) -> None:
         self._拖动中 = False
+        self._收起预览()
         总 = float(self.引擎.统计.总时长秒 or 0.0)
         if 总 > 0:
             self.跳转(总 * self.进度.value() / 1000.0)
@@ -808,10 +829,10 @@ class 播放页(QWidget):
             self._显示预览(图, 秒)
 
     def _显示预览(self, 图, 秒: float) -> None:
-        缩放 = 图.scaledToHeight(84, Qt.TransformationMode.SmoothTransformation)
-        self.预览.setPixmap(QPixmap.fromImage(缩放))
-        self.预览.setText("")
-        self._提示(f"预览 {时间文本(秒)}")
+        """把缩略图贴到进度条上方弹出来（不占常驻空间）。"""
+        self.预览窗.设图(图, 时间文本(秒))
+        self.预览窗.弹出(self.进度)
+        self._预览显示中 = True
 
     # ------------------------------------------------------------------ 截图 / 收尾
 
