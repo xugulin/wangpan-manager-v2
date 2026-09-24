@@ -1,9 +1,11 @@
 """命名解析的回归测试（**全部离线**）。
 
-覆盖三块：
+覆盖四块：
 1. 官方命名规范里的示例（电影/剧集/多版本/多段/特别篇/番外/外挂字幕）；
 2. 原型踩过的 5 个坑（每个坑一条专门的回归测试，防止改回去）；
-3. 路径级猜测 :func:`~wangpan.scrape.命名解析.猜剧集路径`（真的要建目录，验证"往上找"的逻辑）。
+3. 路径级猜测 :func:`~wangpan.scrape.命名解析.猜剧集路径`（真的要建目录，验证"往上找"的逻辑）；
+4. **真机日志里的"改名文件"**（网盘里的剧集只剩"数字 + 画质标签"，标题只能从父目录名兜底）
+   —— 见 :class:`集号在最前面测试` 与 :class:`目录名清洗测试`，两个方向的误判都钉住。
 """
 
 from __future__ import annotations
@@ -349,6 +351,151 @@ class 标题清理测试(unittest.TestCase):
         self.assertEqual(转半角("ＡＢＣ１２３（２０１９）"), "ABC123(2019)")
 
 
+class 集号在最前面测试(unittest.TestCase):
+    """真机日志里的"改名文件"：网盘里的番剧/剧集被改成"数字 + 画质标签"，标题整个丢掉。
+
+    这一批用例就是实测样例（下面每条断言的期望值都是从真机日志里抄下来的），
+    同时钉住**两个方向**：真的剧集文件必须认出来，真电影绝不能被当成第 N 集。
+    """
+
+    仙逆目录 = "仙逆.4K高码.SDR.60fps"
+
+    def test_真机样例_仙逆的数字开头分集(self):
+        for 名, 集 in (("146.SDR.8bit.2160p.60fps.DDP5.1.WEB-DL.H265.mp4", 146),
+                      ("131.SDR.8bit.2160p.60fps.AAC2.0.WEB-DL.H265.mp4", 131)):
+            with self.subTest(文件名=名):
+                结果 = 解析(名, 父目录名=self.仙逆目录)
+                self.assertEqual(结果.类型, "集")
+                # 文件名里一个标题都没有 → 标题回退到父目录名，且画质标签要清干净
+                self.assertEqual(结果.标题, "仙逆")
+                self.assertEqual((结果.季, 结果.集), (1, 集))
+                self.assertIsNone(结果.年份)
+
+    def test_真机样例_英文名剧集不许退化(self):
+        """同目录里的英文命名自带标题：不能被"数字开头"规则改坏（改坏就退回改之前了）。"""
+        结果 = 解析("Renegade.Immortal.S01E138.2023.2160p.WEB-DL.H265.10bit.DDP2.0-PanWEB.mkv",
+                  父目录名=self.仙逆目录)
+        self.assertEqual(结果.类型, "集")
+        self.assertEqual(结果.标题, "Renegade Immortal")
+        self.assertEqual((结果.季, 结果.集), (1, 138))
+        self.assertEqual(结果.年份, 2023)
+
+    def test_真机样例_电影不许退化(self):
+        结果 = 解析("沙丘.2021.2160p.WEB-DL.H265.mkv", 父目录名="电影")
+        self.assertEqual(结果.类型, "电影")
+        self.assertEqual(结果.标题, "沙丘")
+        self.assertEqual(结果.年份, 2021)
+        self.assertIsNone(结果.集)
+
+    def test_真机样例_纯集号文件名用父目录名当标题(self):
+        甲 = 解析("01.mp4", 父目录名="某剧")
+        self.assertEqual((甲.类型, 甲.标题, 甲.季, 甲.集), ("集", "某剧", 1, 1))
+        乙 = 解析("第03集.mp4", 父目录名="某剧")
+        self.assertEqual((乙.类型, 乙.标题, 乙.集), ("集", "某剧", 3))
+
+    def test_集号在最前面的各种写法(self):
+        for 名, 集 in (("05.mkv", 5), ("12 - 标题.mp4", 12), ("12.标题.mp4", 12),
+                      ("100_某集.mp4", 100), ("146 SDR 2160p WEB-DL H265.mp4", 146)):
+            with self.subTest(文件名=名):
+                结果 = 解析(名, 父目录名="某剧")
+                self.assertEqual((结果.类型, 结果.季, 结果.集), ("集", 1, 集))
+                self.assertEqual(结果.标题, "某剧")
+
+    def test_季号取父目录里写明的那个(self):
+        """``146.…`` 这种写法没有季信息：默认第 1 季，父目录写了季就用父目录的。"""
+        for 目录, 期望季 in (("仙逆 第2季", 2), ("仙逆 第二季", 2), ("Show S02", 2),
+                        ("Season 03", 3), ("某剧 第十二季", 12)):
+            with self.subTest(父目录名=目录):
+                结果 = 解析("05.mkv", 父目录名=目录)
+                self.assertEqual((结果.季, 结果.集), (期望季, 5))
+
+    def test_同集两个版本仍能归并(self):
+        self.assertTrue(是同一集的不同版本("146.SDR.1080p.mp4", "146.SDR.2160p.mp4"))
+        self.assertFalse(是同一集的不同版本("146.SDR.1080p.mp4", "147.SDR.1080p.mp4"))
+
+    def test_特别篇目录里的数字开头文件(self):
+        """季目录最权威：``Specials/05.mkv`` 是特别篇第 5 集，不是普通第 1 季第 5 集。"""
+        结果 = 解析("05.mkv", 父目录名="某剧", 季目录名="Specials")
+        self.assertEqual((结果.季, 结果.集, 结果.特别篇), (0, 5, True))
+
+
+class 年份防误判测试(unittest.TestCase):
+    """防误判方向一：**年份不是集号**（`2012.mp4` 是电影，不是第 2012 集）。"""
+
+    def test_四位年份一律不当集号(self):
+        for 名, 期望年 in (("2012.mp4", 2012), ("1917.mkv", 1917), ("1994.mkv", 1994)):
+            with self.subTest(文件名=名):
+                结果 = 解析(名)
+                self.assertIsNone(结果.集)
+                self.assertEqual(结果.类型, "电影")
+                self.assertEqual(结果.年份, 期望年)
+
+    def test_片名是年份时取后面那个年份(self):
+        """`1917.2019.1080p.mkv` = 片名 1917（2019 年的电影）：标题和年份各归各位。"""
+        结果 = 解析("1917.2019.1080p.mkv")
+        self.assertIsNone(结果.集)
+        self.assertEqual(结果.类型, "电影")
+        self.assertEqual(结果.标题, "1917")
+        self.assertEqual(结果.年份, 2019)
+
+    def test_数字开头的英文片名不当集号(self):
+        """`12 Angry Men` / `13 Going on 30` 是"数字 + 英文单词"的片名，不是第 12/13 集。"""
+        for 名, 标题 in (("12 Angry Men (1957).mkv", "12 Angry Men"),
+                      ("13 Going on 30.mkv", "13 Going on 30")):
+            with self.subTest(文件名=名):
+                结果 = 解析(名)
+                self.assertEqual(结果.类型, "电影")
+                self.assertIsNone(结果.集)
+                self.assertEqual(结果.标题, 标题)
+
+    def test_带前导零的一律当集号(self):
+        """前导零是"这是集号不是续集编号"的强信号（既有原则，这里防止被上面的规则误伤）。"""
+        结果 = 解析("01 Pilot.mkv", 父目录名="某剧")
+        self.assertEqual((结果.季, 结果.集), (1, 1))
+
+    def test_裸的四位数字只在有前导零或有季上下文时才当集号(self):
+        self.assertIsNone(解析("1408.mkv").集)                      # 电影《1408》
+        self.assertEqual(解析("0146.mkv", 父目录名="某剧").集, 146)      # 长番的零填充集号
+        带季 = 解析("1408.mkv", 季目录名="Season 02")
+        self.assertEqual((带季.季, 带季.集), (2, 1408))               # 路径已经说明它是剧集
+
+    def test_发布标签里的数字不当集号(self):
+        """数字后面跟的是字母（1080p/2160p/8bit/x264）→ 连候选都不算。"""
+        for 名 in ("1080p.mkv", "2160p.WEB-DL.mkv", "Movie.2021.1080p.WEB-DL.x264.mkv",
+                   "Movie (2021).3D.FTAB.1080p.mkv"):
+            with self.subTest(文件名=名):
+                self.assertIsNone(解析(名).集)
+
+
+class 目录名清洗测试(unittest.TestCase):
+    """防误判方向二：标题兜底到父目录名时，**画质/语言/更新状态标签必须清干净**。
+
+    清不干净的话，标题就成了"仙逆 高码 SDR 60fps"——搜 TMDB 一条都搜不到。
+    """
+
+    def test_真机目录名清成裸标题(self):
+        for 目录, 标题 in (("仙逆.4K高码.SDR.60fps", "仙逆"),
+                        ("怪奇物语 4K HDR 60fps", "怪奇物语"),
+                        ("仙逆【4K】高码.SDR", "仙逆"),
+                        ("沙丘_2160p_WEB-DL_H265", "沙丘"),
+                        ("某剧 更新至146集", "某剧"),
+                        ("某剧 已完结 4K", "某剧"),
+                        ("某剧 全24集 国语中字", "某剧"),
+                        ("某剧 简中内嵌 1080p", "某剧")):
+            with self.subTest(目录名=目录):
+                # 文件名主干里只剩画质标签 → 标题只能回退到父目录名
+                self.assertEqual(解析("2160p.mkv", 父目录名=目录).标题, 标题)
+
+    def test_真标题不许被切掉(self):
+        for 名, 标题 in (("沙丘.2021.2160p.mkv", "沙丘"),
+                      ("仙逆.S01E01.4K高码.mkv", "仙逆"),
+                      ("怪奇物语.S01E01.1080p.mkv", "怪奇物语"),
+                      ("Renegade.Immortal.S01E01.1080p.H265.mkv", "Renegade Immortal"),
+                      ("Spider-Man.2002.1080p.mkv", "Spider-Man")):
+            with self.subTest(文件名=名):
+                self.assertEqual(解析(名).标题, 标题)
+
+
 class 猜剧集路径测试(unittest.TestCase):
     def _建(self, 相对: str) -> Path:
         with 临时目录() as 名:
@@ -420,6 +567,14 @@ class 猜剧集路径测试(unittest.TestCase):
         self.assertEqual(结果.类型, "集")
         self.assertEqual(结果.标题, "Series Name A")
         self.assertEqual((结果.季, 结果.集, 结果.集到), (1, 1, 2))
+
+    def test_改名成数字加画质标签的剧集目录(self):
+        """真机形态：``仙逆.4K高码.SDR.60fps/146.SDR.…mp4``（标题和季集都只能靠上下文补）。"""
+        路径 = self._放("仙逆.4K高码.SDR.60fps/"
+                    "146.SDR.8bit.2160p.60fps.DDP5.1.WEB-DL.H265.mp4")
+        结果 = 猜剧集路径(路径)
+        self.assertEqual((结果.类型, 结果.标题), ("集", "仙逆"))
+        self.assertEqual((结果.季, 结果.集), (1, 146))
 
     def test_季目录传目录本身(self):
         路径 = self._放("Series Name A (2021)/Season 01/x.mkv")

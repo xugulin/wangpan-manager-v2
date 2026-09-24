@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.公用 import 临时目录
 
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from wangpan.scrape.库 import 资料库, 查询条件
 from wangpan.scrape.模型 import (图片, 图片类型, 媒体条目, 媒体类型, 匹配候选, 集, 季)
 from wangpan.scrape.服务 import 刮削服务, 刮削设置
+from wangpan.identify import 学习
 
 应用 = QApplication.instance() or QApplication([])
 
@@ -282,6 +284,15 @@ class 服务队列测试(unittest.TestCase):
         self.addCleanup(self.库.关闭)
         self.客户端 = 含糊TMDB()
         self.日志: list[str] = []
+        # P5 起识别管线会**读学习库**（"人工确认过的名字第二次直接命中"，P4 的闭环），
+        # 所以这一类里"采纳候选"写下的确认会立刻影响后面的用例（`重搜` 那条就是被
+        # 上一条写下的「含糊的名字 → 202」顶成自动入库的）。给每个用例一份**自己的**
+        # 学习库，测的就是这条用例本身 —— 与 tests/test_识别学习.py 的做法一致
+        # （那里也是用 mock 把 学习.默认学习库路径 指到临时文件）。
+        临时学习库 = self.根 / "识别学习.json"
+        补丁 = mock.patch.object(学习, "默认学习库路径", lambda: 临时学习库)
+        补丁.start()
+        self.addCleanup(补丁.stop)
         self.服务 = 刮削服务(self.库, self.客户端, None,
                        刮削设置(最小文件字节=1024, 下载图片=False),
                        日志回调=self.日志.append)

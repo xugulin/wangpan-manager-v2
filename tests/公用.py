@@ -27,6 +27,31 @@ if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY") \
 #: 随仓库带的小素材（几十 KB）：没有 ffmpeg 命令时用它，测试就不再"跳过"
 自带素材目录 = 项目根 / "工具" / "测试素材"
 
+#: 把 **P4 学习库**（``数据/识别学习.json``）引到临时目录：测试会真的走
+#: "人工确认 → 写学习库"这条闭环（``wangpan/scrape/服务.py`` 的接线），
+#: 而**测试绝不许往用户的数据目录里写东西** —— 用户点几十次攒下来的确认不能被测试污染
+#: （这是真机复验的纪律：跑完留下干净的用户数据）。
+#: 生产路径上这个变量是空的，所以默认路径仍然是 ``数据/识别学习.json``。
+if not os.environ.get("V2_识别学习库"):
+    _学习库临时目录 = tempfile.mkdtemp(prefix="v2测试_识别学习_")
+    os.environ["V2_识别学习库"] = os.path.join(_学习库临时目录, "识别学习.json")
+    import atexit
+    import shutil as _shutil
+
+    atexit.register(_shutil.rmtree, _学习库临时目录, True)
+
+#: 同理把 **识别检索缓存**（``数据/识别检索缓存.json``）也引到临时目录：P5 之后单测会真的走
+#: "扫描 → 识别 → 落库"（服务层接了识别管线），那一步会写这份缓存 —— 那是**缓存**不是用户
+#: 数据，但没必要让测试往仓库的数据目录里堆假客户端的条目（键里有命名空间，不会读错，
+#: 只是"跑完要留干净的用户数据"）。
+if not os.environ.get("V2_识别检索缓存"):
+    _检索缓存临时目录 = tempfile.mkdtemp(prefix="v2测试_识别检索_")
+    os.environ["V2_识别检索缓存"] = os.path.join(_检索缓存临时目录, "识别检索缓存.json")
+    import atexit
+    import shutil as _shutil
+
+    atexit.register(_shutil.rmtree, _检索缓存临时目录, True)
+
 
 def 有ffmpeg() -> bool:
     return bool(shutil.which("ffmpeg"))

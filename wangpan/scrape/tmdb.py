@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from .模型 import (人物, 人物工种, 参演, 图片, 图片类型, 媒体条目, 媒体类型, 季, 集,
                 分级, 匹配候选)
@@ -412,6 +412,40 @@ class TMDB客户端:
             if 想要 is not None:
                 图片们 = [x for x in 图片们 if x.类型 is 想要]
         return 排序图片(图片们, self.配置.image_language)
+
+    def 取别名们(self, 类型, id: str) -> list[str]:
+        """这部作品在 TMDB 里**所有记着的名字**（别名 + 各语言译名，去重保序）。
+
+        为什么必须有这个公开接口（P5 接线时补的）：识别打分要拿"英文/罗马音写法"跟
+        文件名比。真机样本 ``Renegade.Immortal.S01E138…`` 与 TMDB 中文标题《仙逆》
+        **没有任何共同字符**，只比字符串永远是 0 分 —— 而 TMDB 之所以能用这个文件名
+        搜到正确条目，靠的正是它内部记着的这两个接口里的名字（``Renegade Immortal``
+        只在 ``translations`` 里）。有了它，``identify.详情`` 就不必再去碰私有方法。
+
+        两个接口的形状不一样，这是官方事实（实测）：
+        * ``alternative_titles``：剧集放 ``results``、电影放 ``titles``，字段是 ``title``；
+        * ``translations``：``translations[].data.name``（剧集）/ ``.title``（电影）。
+
+        键沿用 ``{id}-alt``/``{id}-trans``：与 P3 评测脚本用的是同一份磁盘缓存，
+        所以"补成公开方法"不会让已经抓过的名字重抓一遍。
+        """
+        种类 = "tv" if str(getattr(类型, "value", 类型)) == "tv" else "movie"
+        出: list[str] = []
+        别名数据 = self._取一份(f"/{种类}/{id}/alternative_titles", {}, 种类, f"{id}-alt")
+        for 桶 in ("results", "titles"):
+            for 条 in 别名数据.get(桶) or []:
+                if isinstance(条, Mapping):
+                    文本 = str(条.get("title") or 条.get("name") or "").strip()
+                    if 文本:
+                        出.append(文本)
+        译名数据 = self._取一份(f"/{种类}/{id}/translations", {}, 种类, f"{id}-trans")
+        for 条 in 译名数据.get("translations") or []:
+            数据 = 条.get("data") if isinstance(条, Mapping) else None
+            if isinstance(数据, Mapping):
+                文本 = str(数据.get("name") or 数据.get("title") or "").strip()
+                if 文本:
+                    出.append(文本)
+        return list(dict.fromkeys(出))
 
     def _详情数据(self, 种类: str, id: str, 附加: str) -> dict:
         参数 = {"append_to_response": 附加, "include_image_language": self.图片语言参数()}
