@@ -210,7 +210,11 @@ class 路径可移植性测试(unittest.TestCase):
                         f"venv 不在项目内：{主环境}")
         self.assertTrue(str(项目解释器).startswith(根),
                         f"解释器路径不在项目内：{项目解释器}")
-        self.assertTrue(项目解释器.is_file(), f"解释器不存在：{项目解释器}")
+        # ⚠️ 不断言"解释器一定存在"：`项目解释器` 是**按平台**算的 ——
+        #    Linux 指 运行环境/venv/bin/python，Windows 指 运行环境/python/Scripts/python.exe
+        #    （Windows 绿色版把依赖直接装在自带独立 Python 里）。
+        #    CI 的 Windows runner 只建了 venv（模拟开发环境），所以这个文件本来就不存在；
+        #    断言它存在会假红（CI 真机抓到）。这一条要钉的是"路径在项目内"，仅此而已。
 
 
 class 子进程不弹黑框测试(unittest.TestCase):

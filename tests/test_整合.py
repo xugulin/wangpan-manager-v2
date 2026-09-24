@@ -225,25 +225,29 @@ class 弹幕接线测试(unittest.TestCase):
         from tests.公用 import 临时目录
         from PySide6.QtCore import QTimer
         from wangpan.ui.播放页 import 播放页
-        with 临时目录() as 目录名:
-            目录 = Path(目录名)
-            视频 = 目录 / "样片.mp4"
-            shutil.copy2(自带素材(), 视频)
-            # 最小可用的 B站弹幕 XML（两条：一条滚动、一条顶部）
-            视频.with_suffix(".xml").write_text(
-                '<?xml version="1.0" encoding="UTF-8"?><i>'
-                '<d p="1.0,1,25,16777215,0,0,0,0">第一条弹幕</d>'
-                '<d p="1.5,1,25,16711680,0,0,0,5">顶部弹幕</d>'
-                '</i>', encoding="utf-8")
-            页 = 播放页()
-            self.addCleanup(页.关闭)
-            页.resize(640, 400)
-            self.assertTrue(页.打开(str(视频)))
-            QTimer.singleShot(900, 应用.quit)
-            应用.exec()
-            self.assertTrue(页.弹幕.有弹幕, "同名 XML 应当被自动装上")
-            self.assertGreaterEqual(页.弹幕.装载结果.条数, 2,
-                                    f"两条都该装上；实际 {页.弹幕.装载结果.条数}")
+        # ⚠️ 不能用 `with 临时目录()`：它在语句块结束时就删目录，而那时播放器
+        #    还开着那个视频文件 —— Windows 上 `WinError 32 文件被占用`，删不掉就报错
+        #    （CI 真机抓到的）。改成 addCleanup，靠 LIFO：先关播放页，再删临时目录。
+        临时 = 临时目录()
+        self.addCleanup(临时.cleanup)
+        目录 = Path(临时.name)
+        视频 = 目录 / "样片.mp4"
+        shutil.copy2(自带素材(), 视频)
+        # 最小可用的 B站弹幕 XML（两条：一条滚动、一条顶部）
+        视频.with_suffix(".xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><i>'
+            '<d p="1.0,1,25,16777215,0,0,0,0">第一条弹幕</d>'
+            '<d p="1.5,1,25,16711680,0,0,0,5">顶部弹幕</d>'
+            '</i>', encoding="utf-8")
+        页 = 播放页()
+        self.addCleanup(页.关闭)
+        页.resize(640, 400)
+        self.assertTrue(页.打开(str(视频)))
+        QTimer.singleShot(900, 应用.quit)
+        应用.exec()
+        self.assertTrue(页.弹幕.有弹幕, "同名 XML 应当被自动装上")
+        self.assertGreaterEqual(页.弹幕.装载结果.条数, 2,
+                                f"两条都该装上；实际 {页.弹幕.装载结果.条数}")
 
 
 class AI顾问接线测试(unittest.TestCase):
