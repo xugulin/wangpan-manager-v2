@@ -755,11 +755,20 @@ class 播放页面(QWidget):
             "视频 (*.mp4 *.mkv *.avi *.mov *.flv *.ts *.webm);;所有文件 (*)")
         if not 路径:
             return
-        p = Path(路径)
+        self.加入清单路径(路径)
+
+    def 加入清单路径(self, 路径: str) -> bool:
+        """把一个本地文件加进播放清单（命令行多选、拖放、外部调用都走这条）。"""
+        p = Path(str(路径))
+        if not p.is_file():
+            self.状态标签.setText(f"⚠️ 文件不存在，没加进清单：{p}")
+            return False
         项 = 播放项(标题=p.name, 网盘标识="", 远端路径="",
                   本地路径=str(p), 大小=p.stat().st_size, 来源="本地")
-        if self.清单.添加(项):
-            self.状态标签.setText(f"📋 已加入清单：{p.name}")
+        好 = bool(self.清单.添加(项))
+        self.状态标签.setText(f"📋 已加入清单：{p.name}" if 好
+                          else f"📋 清单里已有：{p.name}")
+        return 好
 
     def _清单选了某项(self, 项) -> None:
         if 项 is None:

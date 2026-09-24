@@ -176,9 +176,11 @@ class 主窗口(QMainWindow):
         self._AI运行时 = None
         self._AI不可用 = ""
         self._空状态页: 空状态页 | None = None
+        self._当前页名 = ""
+        self._播放标题 = ""
         self._当前标识 = ""
 
-        self.setWindowTitle("网盘管理 V8_3 · 去 Alist 直连直传")
+        self.setWindowTitle("网盘管理")
         self._按屏幕定尺寸()
         self._应用日志配置()
         self._构建界面()
@@ -264,7 +266,7 @@ class 主窗口(QMainWindow):
             if 起始页 is not None:
                 self.堆叠.setCurrentWidget(起始页)
             self._设置导航激活(起始按钮)
-            self.当前网盘标签.setText(起始标签)
+            self._设页名(起始标签)
         except Exception:  # noqa: BLE001
             pass
         self.追加日志(f"[界面] 已预建各页（主题样式下首次显示最贵，先建好就不卡了）："
@@ -463,6 +465,49 @@ class 主窗口(QMainWindow):
                 self.追加日志(f"[AI] 收尾失败（不影响退出）：{错}")
             except Exception:
                 pass
+
+    # ==================== 窗口标题（跟随当前页）====================
+
+    def _设页名(self, 页名: str) -> None:
+        """状态栏那个"当前在哪一页"的标签 + **窗口标题**一起更新。
+
+        为什么窗口标题也要跟着变（整合后加的）：
+        ① 用户侧：任务栏/窗口列表里能一眼看出"这个窗口停在哪一页"；
+        ② 测试侧：Wayland 会话里外部工具读不到应用内部状态，但
+           ``xdotool getwindowname`` / 窗口列表是**不依赖键盘焦点**的可靠信号 ——
+           真机自动化靠它断言"翻页到底成没成"（屏幕上随时可能弹出系统对话框抢焦点，
+           光看截图会把"键没送到"误判成"功能坏了"）。
+        """
+        变了 = str(页名 or "") != getattr(self, "_当前页名", "")
+        self._当前页名 = str(页名 or "")
+        if hasattr(self, "当前网盘标签"):
+            self.当前网盘标签.setText(self._当前页名)
+        self._刷新窗口标题()
+        if 变了:
+            # 真的换页才记一行：出问题时"用户当时在哪一页"从日志就能看出来；
+            # 真机测试也用它断言翻页成没成（Wayland 下读不到窗口标题）。
+            try:
+                self.追加日志(f"[界面] 切到 {self._当前页名}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def 设置播放标题(self, 文件名: str) -> None:
+        """正在播哪个片子也写进标题（打开/切集时调）。"""
+        self._播放标题 = str(文件名 or "")
+        self._刷新窗口标题()
+
+    def _刷新窗口标题(self) -> None:
+        部分 = ["网盘管理"]
+        页名 = getattr(self, "_当前页名", "")
+        if 页名:
+            部分.append(页名)
+        在播 = getattr(self, "_播放标题", "")
+        if 在播:
+            部分.append(f"▶ {在播}")
+        try:
+            self.setWindowTitle(" · ".join(部分))
+        except Exception:  # noqa: BLE001
+            pass
 
     def 保存配置(self) -> bool:
         """把当前配置写回 ``配置.json``（页面改完设置后调它）。
@@ -697,7 +742,7 @@ class 主窗口(QMainWindow):
                 self.堆叠.addWidget(self._放进堆叠(self._空状态页))
             self._切到(self._空状态页)
             self._当前标识 = ""
-            self.当前网盘标签.setText("未选择网盘")
+            self._设页名("未选择网盘")
             self._更新管理按钮()
             return
 
@@ -772,7 +817,7 @@ class 主窗口(QMainWindow):
         self._当前标识 = 标识
         self._切到(self._网盘页面[标识])
         self._设置导航激活(self._网盘按钮.get(标识))
-        self.当前网盘标签.setText(f"📁 {实例['名称']}")
+        self._设页名(f"📁 {实例['名称']}")
         设置界面配置(self.配置, 上次网盘=标识)
         self.状态消息(f"已切换到：{实例['名称']}")
         self._更新管理按钮()
@@ -784,12 +829,14 @@ class 主窗口(QMainWindow):
             self._播放页面.状态更新.connect(
                 self._播放页面.处理准备结果,
                 Qt.QueuedConnection)
+            # 正在播哪个片子也写进窗口标题（任务栏一眼可见，真机测试也能读到）
+            self._播放页面.内核页.标题变了.connect(self.设置播放标题)
             self.堆叠.addWidget(self._放进堆叠(self._播放页面))
         else:
             self._播放页面.刷新网盘列表()
         self._切到(self._播放页面)
         self._设置导航激活(self.播放按钮)
-        self.当前网盘标签.setText("🎬 视频播放")
+        self._设页名("🎬 视频播放")
         self._更新管理按钮()
 
     def 播放页面(self) -> 播放页面:
@@ -832,7 +879,7 @@ class 主窗口(QMainWindow):
             self.堆叠.addWidget(self._放进堆叠(页))
         self._切到(self._媒体库页面)
         self._设置导航激活(self.媒体库按钮)
-        self.当前网盘标签.setText("🎞 媒体库")
+        self._设页名("🎞 媒体库")
         self._更新管理按钮()
 
     def 媒体库页(self):
@@ -848,7 +895,7 @@ class 主窗口(QMainWindow):
             self._传输页面.刷新网盘列表()
         self._切到(self._传输页面)
         self._设置导航激活(self.传输按钮)
-        self.当前网盘标签.setText("📤 跨网盘传输")
+        self._设页名("📤 跨网盘传输")
         self._更新管理按钮()
 
     def 传输页面(self) -> 传输页面:
@@ -874,7 +921,7 @@ class 主窗口(QMainWindow):
             self._敏感词页面.刷新()
         self._切到(self._敏感词页面)
         self._设置导航激活(self.敏感词按钮)
-        self.当前网盘标签.setText("🔒 敏感词")
+        self._设页名("🔒 敏感词")
         self._更新管理按钮()
 
     def 切换到AI页(self):
@@ -887,7 +934,7 @@ class 主窗口(QMainWindow):
             self._AI页面.刷新()
         self._切到(self._AI页面)
         self._设置导航激活(self.AI按钮)
-        self.当前网盘标签.setText("🤖 AI")
+        self._设页名("🤖 AI")
         self._更新管理按钮()
 
     def AI页面(self):
@@ -900,7 +947,7 @@ class 主窗口(QMainWindow):
             self.堆叠.addWidget(self._放进堆叠(self._日志页面))
         self._切到(self._日志页面)
         self._设置导航激活(self.日志按钮)
-        self.当前网盘标签.setText("📋 日志")
+        self._设页名("📋 日志")
         self._更新管理按钮()
 
     def 设置页(self) -> 设置页面:
@@ -913,7 +960,7 @@ class 主窗口(QMainWindow):
         self.设置页().刷新()
         self._切到(self._设置页面)
         self._设置导航激活(self.设置按钮)
-        self.当前网盘标签.setText("⚙ 设置")
+        self._设页名("⚙ 设置")
         self._更新管理按钮()
 
     def _设置导航激活(self, 激活按钮):
@@ -1154,10 +1201,13 @@ class 主窗口(QMainWindow):
     # ==================== 日志 / 状态 ====================
 
     def keyPressEvent(self, 事件):  # noqa: N802 - Qt 命名
-        """Esc：正在全屏就先退出全屏（需求：Esc 退全屏）。
+        """键盘：Esc 退全屏；**Ctrl+数字**切页（1 网盘 / 2 传输 / 3 播放 / 4 媒体库 /
+        5 敏感词 / 6 AI / 7 日志 / 8 设置）。
 
-        为什么还要这里兜一手：全屏助手装的 QShortcut 走的是应用级快捷键分发，
-        某些合成器/焦点情况下不一定到得了；而 keyPressEvent 一定收得到。
+        为什么补翻页快捷键（整合后加的）：
+        ① 用户侧：左侧那排按钮要拿鼠标去点，键鼠切换时很别扭；
+        ② 测试侧：Wayland 会话里外部工具点不了窗口（X11 的 xdotool 管不到原生
+           Wayland 客户端），只有键盘事件能可靠送进去 —— 真机自动化全靠它。
         """
         try:
             from PySide6.QtCore import Qt as _Qt
@@ -1172,9 +1222,41 @@ class 主窗口(QMainWindow):
                         except Exception:  # noqa: BLE001
                             pass
                     return
+            if 事件.modifiers() & _Qt.KeyboardModifier.ControlModifier:
+                键到动作 = {
+                    _Qt.Key.Key_1: self._按数字切页网盘,
+                    _Qt.Key.Key_2: self.切换到传输页,
+                    _Qt.Key.Key_3: self.切换到播放页,
+                    _Qt.Key.Key_4: self.切换到媒体库页,
+                    _Qt.Key.Key_5: self.切换到敏感词页,
+                    _Qt.Key.Key_6: self.切换到AI页,
+                    _Qt.Key.Key_7: self.切换到日志页,
+                    _Qt.Key.Key_8: self.切换到设置页,
+                }
+                动作 = 键到动作.get(事件.key())
+                if 动作 is not None:
+                    动作()
+                    return
+                if 事件.key() == _Qt.Key.Key_Q:
+                    # Ctrl+Q：标准的"退出"。走 self.close() 而不是 quit()，
+                    # 这样一定会过 closeEvent 那套收尾（停线程/存配置/关库/停 AI 子进程）。
+                    self.close()
+                    return
         except Exception:  # noqa: BLE001
             pass
         super().keyPressEvent(事件)
+
+    def _按数字切页网盘(self) -> None:
+        """Ctrl+1：回到**当前选中的网盘页**（没有就退回空状态页/第一个网盘）。"""
+        标识 = self._当前标识 or (界面配置(self.配置).get("上次网盘") or "")
+        if 标识:
+            self.切换网盘页(标识)
+            return
+        标识们 = [x["标识"] for x in 网盘实例列表(self.配置) if x["启用"]]
+        if 标识们:
+            self.切换网盘页(标识们[0])
+        elif self._空状态页 is not None:
+            self._切到(self._空状态页)
 
     def 追加日志(self, 消息: str, 级别: str = "信息"):
         """线程安全：任何线程都可以调用。
@@ -1599,7 +1681,43 @@ def _收尾退出(退出码: int = 0, 宽限秒: float = 1.0) -> None:
         _os._exit(int(退出码 or 0))
 
 
-def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
+def _启动即播(窗口, 打开路径) -> None:
+    """命令行/文件管理器给的本地文件：先开播第一个，其余的按顺序加进播放清单。
+
+    为什么要"其余进清单"：用户在多选了一堆片子然后"用本程序打开"时，
+    期望的是"播第一个、后面排队"，而不是只播第一个把其余丢掉。
+    """
+    from pathlib import Path as _Path
+    if not 打开路径:
+        return
+    路径们 = [打开路径] if isinstance(打开路径, str) else list(打开路径)
+    视频 = [str(p) for p in 路径们
+           if p and _Path(str(p)).is_file()]
+    if not 视频:
+        return
+    try:
+        窗口.播放本地视频(视频[0])
+    except Exception as 错:  # noqa: BLE001 - 播不了也不能让程序起不来
+        try:
+            窗口.追加日志(f"⚠️ 打不开命令行给的视频：{错}")
+        except Exception:
+            pass
+        return
+    for 多余 in 视频[1:]:
+        try:
+            窗口.播放页面().加入清单路径(多余)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None,
+            打开路径: str | list[str] | None = None):
+    """起界面并进事件循环。
+
+    :param 打开路径: 启动时直接开播的本地文件（``启动.sh 某视频.mp4``、桌面图标拖文件、
+        文件管理器"用本程序打开"都走这条）。支持一个路径或一串路径 —— 串的第一个开播，
+        其余按顺序进播放清单。
+    """
     import sys as _sys
     应用 = QApplication.instance() or QApplication(_sys.argv)
     应用 = _调优应用(应用)
@@ -1618,6 +1736,9 @@ def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
             pass
     窗口 = 主窗口(AI运行时=AI运行时, 主题=主题, 启动日志=启动日志)
     窗口.show()
+    # 启动后直接开播命令行给的视频（要让窗口先 show 出来，不然"正在播放"的提示
+    # 和首帧会在窗口还没映射时白做一遍）
+    _启动即播(窗口, 打开路径)
     退出码 = 应用.exec()
     # 事件循环结束 = 用户已经点了 ×（或程序自己退出）：先把 AI 的常驻子进程收掉，
     # 再把遗留线程放一小会儿就收工，保证进程"点了就走"，不留僵尸。
