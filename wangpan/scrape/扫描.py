@@ -234,9 +234,13 @@ def 造远端单元(网盘标识: str, 远端目录: str,
     结果: list[发现条目] = []
     目录名 = Path(str(远端目录 or "/")).name
     for 远端 in sorted(文件们 or []):
-        if not 是视频文件(Path(远端).name):
+        远端文本 = str(远端)
+        # ⚠️ 允许调用方给"已经带前缀"的路径：`远端视频们()` 返回的就是
+        #    `标识:路径`，早先这里又拼了一次前缀 → 库里出现 `guangya:guangya:/…`
+        #    （真机日志实证）。带前缀就原样用，别叠。
+        视频 = Path(远端文本 if 远端文本.startswith(前缀) else 前缀 + 远端文本)
+        if not 是视频文件(视频.name):
             continue
-        视频 = Path(前缀 + str(远端))
         解析结果 = 解析(视频.name, 父目录名=目录名)
         类型 = (媒体类型.剧集 if (解析结果.季 is not None or 解析结果.集 is not None)
               else 媒体类型.电影)

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,6 +33,7 @@ from ..subtitle import 找同名字幕, 读字幕文件
 from .播放会话 import 播放会话
 from .视频控件 import 视频控件
 from .悬浮预览 import 悬浮预览窗
+from .流动布局 import 换行按钮区
 
 __all__ = ["播放页", "时间文本"]
 
@@ -82,6 +84,12 @@ class 播放页(QWidget):
         self._上次状态 = ""
         #: 预览小窗现在是不是弹着的（真机测试/自检会看它）
         self._预览显示中 = False
+        #: 缩略图任务**同一时刻只许跑一个**，且共用的解码器必须串行访问。
+        #: 为什么（真机 coredump 实证）：原来每次悬停都新起一个线程，多个线程
+        #: 同时喂同一个解码器 —— FFmpeg 的内部堆会被写坏，崩在 avcodec_send_packet，
+        #: 崩溃线程名就是 `V2-缩略图`（systemd-coredump 里能查到）。
+        self._预览忙 = False
+        self._预览锁 = threading.Lock()
         self._预览缓存: dict[int, QImage] = {}
         self._缩略图器 = None
         self._预览结果 = None
@@ -150,25 +158,21 @@ class 播放页(QWidget):
         self.进度.sliderMoved.connect(self._要预览)
         条布局.addWidget(self.进度)
 
-        行 = QHBoxLayout()
-        行.setContentsMargins(0, 0, 0, 0)
-        行.setSpacing(6)
-        self._控制行 = 行
-        self._建控制按钮(行)
-        行容器 = QWidget()
-        行容器.setLayout(行)
-        行容器.setMinimumWidth(0)
-        self.按钮滚动区 = QScrollArea()
-        self.按钮滚动区.setWidgetResizable(True)
-        self.按钮滚动区.setWidget(行容器)
-        self.按钮滚动区.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.按钮滚动区.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.按钮滚动区.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.按钮滚动区.setMinimumWidth(0)
-        self.按钮滚动区.setFixedHeight(行容器.sizeHint().height() + 16)
-        条布局.addWidget(self.按钮滚动区)
+        # ---- 按钮行：**自动换行**（用户真机反馈："这排按钮没有显示完，
+        #      还有一些超出 GUI 看不见"）。原来包在横向滚动区里、高度只给一行，
+        #      横向滚动条被压得几乎看不见 —— 看不见也点不到。----
+        行容器 = 换行按钮区(间距=6, 行距=6)
+        self._控制行 = 行容器
+        self._建控制按钮(self._控制行)
+        #: 兼容老名字（自检/验收脚本按 `按钮滚动区` 找这一块）
+        self.按钮滚动区 = 行容器
+        条布局.addWidget(行容器)
+        # 布局要再排几次：控制条是在 __init__ 里建的，那会儿按钮的 sizeHint
+        # 还没定型（文字/主题/字体都在后面才落），第一次排出来行数会偏多；
+        # 而且几何没变时 Qt 不会再次调 setGeometry —— 真机实测 11 个按钮被排成 11 行。
+        for _毫秒 in (0, 120, 400):
+            QTimer.singleShot(_毫秒, self._重排控制按钮)
+        self._控制行.重排()
 
         return 条
 
@@ -757,6 +761,10 @@ class 播放页(QWidget):
         if 对象 is self.进度:
             if 事件.type() == 事件.Type.MouseMove:
                 if self.引擎.统计.总时长秒 > 0:
+                    # 先把小窗按光标位置弹出来（内容是"解码预览…"），用户立刻有反馈；
+                    # 缩略图 180ms 去抖 + 后台线程解出来后再补进去 —— 原来只在图出来
+                    # 之后才弹，网络片源解一帧要一会儿，用户会以为"悬停没反应"。
+                    self._预览窗.弹出(self.进度)
                     self._预览定时器.start()
             elif 事件.type() in (事件.Type.Leave, 事件.Type.Hide):
                 # 鼠标离开进度条 → 小窗立刻收起（原来那条常驻黑条是永远在的）
@@ -767,6 +775,13 @@ class 播放页(QWidget):
     def 预览显示中(self) -> bool:
         """预览小窗现在弹着没有（自检/真机测试看它）。"""
         return bool(getattr(self, "_预览显示中", False))
+
+    def _重排控制按钮(self) -> None:
+        """让按钮区按**当前**宽度重排（尺寸没变时 Qt 不会再调 resizeEvent）。"""
+        try:
+            self._控制行.重排()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _收起预览(self) -> None:
         self._预览定时器.stop()
@@ -792,6 +807,8 @@ class 播放页(QWidget):
 
     def _出预览图(self) -> None:
         """在**工作线程**里解一帧缩略图（界面线程里解码会卡界面）。"""
+        if getattr(self, "_预览忙", False):
+            return                      # 上一个还没解完：直接跳过，别叠线程（会崩）
         总 = self.引擎.统计.总时长秒
         if 总 <= 0 or self.引擎.输入 is None:
             return
@@ -804,18 +821,28 @@ class 播放页(QWidget):
         头 = dict(self.会话.直链信息.get("headers") or {})
 
         def 干活():
-            from ..player.缩略图 import 缩略图器
-            器 = self._缩略图器 or 缩略图器(地址, 头, 320, self._写日志)
-            self._缩略图器 = 器
-            图 = 器.取图(秒)
-            if 图 is not None:
-                self._预览缓存[键] = 图
-                if len(self._预览缓存) > 60:
-                    self._预览缓存.pop(next(iter(self._预览缓存)))
-            self._预览结果 = (键, 图, 秒)
+            try:
+                from ..player.缩略图 import 缩略图器
+                # ⚠️ 锁住：这个解码器是**跨悬停复用**的，两个线程同时用它会把
+                #    FFmpeg 的堆写坏（真机 coredump：崩在 avcodec_send_packet）。
+                with self._预览锁:
+                    器 = self._缩略图器 or 缩略图器(地址, 头, 320, self._写日志)
+                    self._缩略图器 = 器
+                    图 = 器.取图(秒)
+                if 图 is not None:
+                    self._预览缓存[键] = 图
+                    if len(self._预览缓存) > 60:
+                        self._预览缓存.pop(next(iter(self._预览缓存)))
+                self._预览结果 = (键, 图, 秒)
+            except Exception as 错:  # noqa: BLE001 - 解不出缩略图不该影响播放
+                self._写日志(f"[播放] 缩略图失败：{错}")
+                self._预览结果 = (键, None, 秒)
+            finally:
+                self._预览忙 = False
 
         import threading
         self._预览结果 = None
+        self._预览忙 = True
         threading.Thread(target=干活, daemon=True, name="V2-缩略图").start()
         QTimer.singleShot(400, self._看预览结果)
 
@@ -926,6 +953,7 @@ class 播放页(QWidget):
             超级(事件)
         区域 = self.视频.size()
         self._视频区变了(区域.width(), 区域.height())
+        self._重排控制按钮()          # 窗口一变宽窄，按钮立刻重排（该换行就换行）
 
     # ------------------------------------------------------------------ 键盘
 

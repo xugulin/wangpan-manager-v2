@@ -78,6 +78,77 @@ class 悬浮面板测试(unittest.TestCase):
         self.assertFalse(窗.isVisible(), "收尾之后不该还显示着")
 
 
+class 控制条按钮换行测试(unittest.TestCase):
+    """按钮**不许超出窗口**（用户真机反馈：进度条下面那排按钮没显示完、点不到）。
+
+    原来包在横向滚动区里、高度只按一行给，滚动条被压得几乎看不见。
+    现在换成"放不下就换行"的换行按钮区。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _取应用()
+
+    def _页(self, 宽):
+        from wangpan.ui.播放页 import 播放页
+        页 = 播放页()
+        页.resize(宽, 700)
+        页.show()
+        _取应用().processEvents()
+        for _ in range(3):
+            _取应用().processEvents()
+        self.addCleanup(页.关闭)
+        return 页
+
+    def test_任何宽度都不越界(self):
+        from PySide6.QtWidgets import QPushButton
+        for 宽 in (1400, 1000, 760, 520):
+            页 = self._页(宽)
+            容器 = 页.按钮滚动区
+            # 显式重排一次：字体/主题是后面才定型的，全量跑（前面已经建过很多控件）
+            # 时布局时机和单跑不同，会出现"还没重排就断言"的假红（实测抖过一次）。
+            容器.重排()
+            _取应用().processEvents()
+            按钮们 = [b for b in 容器.findChildren(QPushButton) if b.isVisible()]
+            self.assertGreater(len(按钮们), 5, "控制条上应该有一排按钮")
+            越界 = [b.text() for b in 按钮们
+                  if b.geometry().right() > 容器.width() + 1
+                  or b.geometry().bottom() > 容器.height() + 1]
+            self.assertEqual(越界, [], f"窗口 {宽} 时有按钮超出了可视范围：{越界}")
+            self.assertEqual(容器.越界的按钮(), [])
+
+    def test_窄了会换行变高(self):
+        宽页 = self._页(1400)
+        窄页 = self._页(520)
+        self.assertLess(窄页.按钮滚动区.行数(), 0.75 * 宽页.按钮滚动区.行数() + 99,
+                        "越窄行数该越多")
+        self.assertGreaterEqual(窄页.按钮滚动区.行数(), 宽页.按钮滚动区.行数())
+        self.assertGreater(窄页.按钮滚动区.height(), 0)
+
+
+class 预览线程串行测试(unittest.TestCase):
+    """缩略图**同一时刻只许跑一个**。
+
+    背景（真机 coredump 实证）：原来每次悬停都新起线程，多线程同时喂同一个
+    解码器 → FFmpeg 内部堆被写坏，崩溃线程名 `V2-缩略图`，栈在 avcodec_send_packet。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _取应用()
+
+    def test_忙的时候不再起新线程(self):
+        from wangpan.ui.播放页 import 播放页
+        页 = 播放页()
+        self.addCleanup(页.关闭)
+        self.assertTrue(hasattr(页, "_预览忙") and hasattr(页, "_预览锁"),
+                        "预览必须有'忙'标记与锁（那是崩溃的根因）")
+        页._预览忙 = True
+        页.引擎.统计.总时长秒 = 10.0          # 免得因为"没时长"提前返回
+        页._出预览图()
+        self.assertTrue(页._预览忙, "上一个还没跑完时，不该再叠一个新任务")
+
+
 class 悬浮预览测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

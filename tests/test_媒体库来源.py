@@ -161,6 +161,17 @@ class 远端单元测试(unittest.TestCase):
                             for u in 单元们), "路径必须是 标识:远端路径 这种写法")
         self.assertEqual(按名["沙丘"].备注, "网盘文件（按文件名刮削）")
 
+    def test_已经带前缀的路径不会再叠一层(self):
+        """`远端视频们()` 返回的就是 `标识:路径` —— 再拼一次会得到 `guangya:guangya:/…`。
+
+        真机日志实证（媒体库扫描时出现过双前缀），所以这里钉住两种输入结果一致。
+        """
+        from wangpan.scrape.扫描 import 造远端单元
+        不带 = 造远端单元("guangya", "/电影", ["/电影/沙丘.2021.mkv"])
+        带 = 造远端单元("guangya", "/电影", ["guangya:/电影/沙丘.2021.mkv"])
+        self.assertEqual(str(不带[0].视频们[0]), "guangya:/电影/沙丘.2021.mkv")
+        self.assertEqual(str(带[0].视频们[0]), str(不带[0].视频们[0]))
+
     def test_刮削服务用喂进来的远端单元_不去碰磁盘(self):
         """远端条目必须走 `远端单元` 这条路 —— 一旦去 `_造单元`（读本地目录）就会抛异常。"""
         from wangpan.scrape.服务 import 刮削服务
