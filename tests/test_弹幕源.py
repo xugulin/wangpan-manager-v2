@@ -32,8 +32,9 @@ from tests.公用 import 临时目录
 from wangpan.danmaku.模型 import 弹幕, 弹幕池, 弹幕模式, 来源标识
 from wangpan.danmaku.源 import (
     本地源, 前16MB的MD5, 建默认源, 弹弹play源, 弹幕源错误, 找同名弹幕文件, 检查业务状态,
-    生成签名头, 素材信息, 应答, 导出为JSON, 官方基地址, 哈希字节数, 解析B站XML,
-    解析响应, 解析条目, 解析我们的JSON, 读同名字幕弹幕, 读凭证, 请求, 纯接口路径)
+    生成签名头, 签名原文, 算签名, 鉴权错误说明, 素材信息, 应答, 导出为JSON, 官方基地址,
+    哈希字节数, 解析B站XML, 解析响应, 解析条目, 解析我们的JSON, 读同名字幕弹幕, 读凭证,
+    请求, 纯接口路径)
 
 弹弹play日志名 = "wangpan.danmaku.源.弹弹play"
 
@@ -102,6 +103,34 @@ def 造源(假: 假传输, 目录: Path, **改动) -> 弹弹play源:
 # ---------------------------------------------------------------------------
 
 class 签名测试(unittest.TestCase):
+    def test_签名原文就是四段直接拼接(self):
+        """``AppId + Timestamp + Path + AppSecret``：**没有分隔符**，时间戳是十进制文本。
+
+        为什么要单独钉这一条：官方文档只给了公式，拼接细节（有没有冒号、时间戳是不是
+        补零、路径带不带查询串）任何一处写错都会得到 ``Invalid Signature``，
+        而报错信息完全一样。这里用固定时间戳 + 假密钥把**原文**和**散列值**都钉死。
+        """
+        self.assertEqual(签名原文("app-id-123", 1700000000, "/api/v2/match", "secret-456"),
+                         "app-id-1231700000000/api/v2/matchsecret-456")
+        # 时间戳当 int 传、当字符串传，结果必须一致（不能拼出 "1700000000" 之外的东西）
+        self.assertEqual(签名原文("id", "1700000000", "/x", "s"),  # type: ignore[arg-type]
+                         "id1700000000/xs")
+
+    def test_算签名是标准base64的sha256(self):
+        """自己手算一遍 sha256 + base64 比对（不调被测函数），钉住"标准 base64"。"""
+        原文 = "id1700000000/api/v2/match秘钥"
+        期望 = b64encode(sha256(原文.encode("utf-8")).digest()).decode("ascii")
+        得到 = 算签名("id", 1700000000, "/api/v2/match", "秘钥")
+        self.assertEqual(得到, 期望)
+        self.assertTrue(得到.endswith("="), "sha256 是 32 字节，base64 必然以 = 结尾")
+        self.assertNotIn("-", 得到)
+        self.assertNotIn("_", 得到)
+
+    def test_中文密钥按utf8编码(self):
+        """密钥是用户手输的，理论上可能是非 ASCII；官方示例统一 UTF-8，别用 latin-1。"""
+        期望 = b64encode(sha256("id1700000000/路径密钥".encode("utf-8")).digest()).decode()
+        self.assertEqual(算签名("id", 1700000000, "/路径", "密钥"), 期望)
+
     def test_签名就是官方那个公式(self):
         """``base64(sha256(AppId + Timestamp + Path + AppSecret))`` —— 手算一遍比对。"""
         时刻 = 1700000000
@@ -157,6 +186,49 @@ class 签名测试(unittest.TestCase):
             配置.write_text("{这不是 JSON", encoding="utf-8")
             with self.assertLogs("wangpan.danmaku.源.弹弹play", level="WARNING"):
                 self.assertEqual(读凭证(配置, 环境={})[:2], ("", ""))
+
+
+class 鉴权错误说明测试(unittest.TestCase):
+    """服务端 ``X-Error-Message`` 是**分类**，每类修法不同，必须翻对。
+
+    官方错误表（``https://doc.dandanplay.com/open/`` §6）：``Missing Authentication
+    Headers`` 缺头、``Invalid Timestamp`` 时钟、``Invalid Signature`` 签名不匹配、
+    ``Invalid AppId`` **签名模式下 = AppId 或 AppSecret 无效**、``Invalid AppSecret``
+    凭证模式专用。翻错的后果是让人去改错的地方（真机踩过：只知道 403，不知道去核对密钥）。
+    """
+
+    def test_每种官方错误的说明都指对了地方(self):
+        例 = {
+            "Missing Authentication Headers": ("鉴权", "appId/appSecret"),
+            "Invalid Timestamp": ("时间", "Unix 秒"),
+            "Invalid AppId": ("AppSecret", "审核"),
+            "Invalid Signature": ("sha256", "查询串"),
+            "Invalid AppSecret": ("轮换", "appSecret"),
+        }
+        for 原文, (关键词甲, 关键词乙) in 例.items():
+            说明 = 鉴权错误说明(原文, 有凭证=True)
+            self.assertIn(关键词甲, 说明, 原文)
+            self.assertIn(关键词乙, 说明, 原文)
+
+    def test_服务端原文必须原样带上(self):
+        """不能把官方原文改写掉 —— 以后排查、以及给官方提工单都要靠它。"""
+        for 原文 in ("Invalid AppId", "Missing Authentication Headers"):
+            self.assertIn(f"服务端原文：{原文}", 鉴权错误说明(原文))
+
+    def test_没配凭证时说清楚是没配(self):
+        说明 = 鉴权错误说明("Invalid AppId", 有凭证=False)
+        self.assertIn("没有", 说明)
+        self.assertIn("Invalid AppId", 说明)
+
+    def test_不认识的错误原样返回(self):
+        """没见过的值不加戏（宁可少说，也别编一个错的修法）。"""
+        self.assertEqual(鉴权错误说明("Something New From Server"), "Something New From Server")
+        self.assertEqual(鉴权错误说明(""), "")
+
+    def test_说明里绝不出现密钥(self):
+        """secret 只可能出现在"原文"里，而原文来自服务端响应头，不含我们的密钥。"""
+        说明 = 鉴权错误说明("Invalid AppId")
+        self.assertNotIn("AppSecret=", 说明)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +376,50 @@ class 取弹幕测试(unittest.TestCase):
             self.assertEqual(头["X-AppId"], "测试AppId")
             self.assertIn("X-Signature", 头)
             self.assertNotIn("测试密钥", json.dumps(头, ensure_ascii=False))
+
+    def test_403错误要带上原文并给出可照做的说明(self):
+        """真机实测的那种响应：HTTP 403 + 空体 + ``X-Error-Message: Invalid AppId``。
+
+        光抛 "HTTP 403" 没人知道该干什么；必须①带上服务端原文②说清"AppId 或 AppSecret
+        无效"（官方语义）③指到 DevCenter 去核对。**不做任何自动重试** —— 凭据错了
+        重试一万次还是 403，只会白白打人家的接口。
+        """
+        with 临时目录() as 目录:
+            假 = 假传输(应答(403, "", {"X-Error-Message": "Invalid AppId"}))
+            源 = 造源(假, Path(目录))
+            with self.assertRaises(弹幕源错误) as 捕获:
+                源.取弹幕("9")
+            说明 = str(捕获.exception)
+            self.assertIn("Invalid AppId", 说明)
+            self.assertIn("AppSecret", 说明)
+            self.assertIn("dev.dandanplay.com", 说明)
+            self.assertEqual(假.次数, 1, "凭据类错误不许自动重试")
+            self.assertNotIn("测试密钥", 说明)
+
+    def test_403缺头与时间戳错误的说明不同(self):
+        """同是 403，``Missing Authentication Headers`` 和 ``Invalid Timestamp``
+        要给出**不一样**的修法（前者说没配凭证、后者说校准时钟）。"""
+        with 临时目录() as 目录:
+            缺头 = 造源(假传输(应答(403, "", {"X-Error-Message": "Missing Authentication Headers"})),
+                       Path(目录))
+            with self.assertRaises(弹幕源错误) as 甲:
+                缺头.取弹幕("9")
+            时钟 = 造源(假传输(应答(403, "", {"X-Error-Message": "Invalid Timestamp"})),
+                       Path(Path(目录) / "c2"))
+            with self.assertRaises(弹幕源错误) as 乙:
+                时钟.取弹幕("9")
+            self.assertIn("时间", str(乙.exception))
+            self.assertNotEqual(str(甲.exception), str(乙.exception))
+
+    def test_403没给X_Error_Message时退回通用报错(self):
+        """没有分类信息就别硬编：老老实实报"HTTP 403 + 路径"。"""
+        with 临时目录() as 目录:
+            源 = 造源(假传输(应答(403, "被网关挡了")), Path(目录))
+            with self.assertRaises(弹幕源错误) as 捕获:
+                源.取弹幕("9")
+            说明 = str(捕获.exception)
+            self.assertIn("403", 说明)
+            self.assertIn("/api/v2/comment/9", 说明)
 
     def test_chConvert可配(self):
         with 临时目录() as 目录:
@@ -481,6 +597,8 @@ class 匹配接口测试(unittest.TestCase):
                 urllib.parse.urlsplit(假.最后一个网址()).query))
             self.assertEqual(查询["anime"], "某番")
             self.assertEqual(查询["episode"], "2")
+            self.assertEqual(查询["v2"], "true",
+                             "官方 2026-07-13 起 v2=true 切新版搜索引擎（签名不含查询串）")
             self.assertTrue(假.最后一个网址().startswith(
                 "https://api.dandanplay.net/api/v2/search/episodes?"))
 

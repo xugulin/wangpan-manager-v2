@@ -23,8 +23,37 @@
 **不做 URL 编码**。这里踩过的坑就是拿整个 URL（带 ``?`` 和域名）去算签名，服务端算的
 是路径，于是永远 401 —— 所以 :func:`纯接口路径` 单独抽出来并有单测钉住。
 
-另有"凭证模式"（``X-AppId`` + ``X-AppSecret``），官方**只建议服务器端**用；
-我们**不实现**，因为那等于把密钥放进每一个请求里、被中间人抄走就等于泄露。
+签名的三段（:func:`签名原文` / :func:`算签名` / :func:`生成签名头`）都是**纯函数**，
+不碰网络、不读时钟（时间戳是参数），所以能用"固定时间戳 + 假密钥"离线钉住算法本身
+（见 ``tests/test_弹幕源.py`` 的 ``签名测试``）。**为什么要拆开**：真机排查时
+"签名算错了"和"凭据无效"都会得到 403，只有把算法钉死了才能确定是谁的错。
+
+另有"凭证模式"（``X-AppId`` + ``X-AppSecret``，无时间戳、无签名）：官方提示**只建议
+服务器端**用。我们**不用它** —— 那等于把密钥原件放进每一个请求里（打开配置就能抄走），
+而签名模式对本项目（客户端应用）更安全。真机排查时两种模式都试过：结果一样是
+``Invalid AppId``，所以"用凭证模式能不能救"已经排除。
+
+``Invalid AppId`` 的确切含义（2026-09 官方文档 · 错误处理表）
+------------------------------------------------------------
+``X-Error-Message`` 是**服务端给的分类**，不是笼统话术：
+
+``Missing Authentication Headers``  三个头没给全；
+``Invalid Timestamp``               时间戳无效或与服务器时间差太大（**Unix 秒**，UTC 无时区概念）；
+``Invalid Signature``               签名不匹配；
+``Invalid AppId``                   **签名验证模式下 = AppId 或 AppSecret 无效**；
+                                    凭证模式下 = AppId 无效。
+
+所以看到 ``Invalid AppId`` 时**算法已经过了服务端的密钥查询**（拿一把不存在的 AppId
+用真密钥签名，服务端分不出来，照样回 ``Invalid AppId``）—— 它意味着
+"这对 AppId/AppSecret 在我这儿查不到"。实测（2026-09-24）：本机拿
+``数据/弹幕源.json`` 里的 AppId + 令牌文件里的**两把**密钥，签名模式与凭证模式
+**全部**回 ``403 Invalid AppId``；同一时刻把时间戳改成 ±1 小时就会回
+``Invalid Timestamp``，证明密钥确实参与了服务端校验、而签名格式本身是对的。
+=> 这不是代码问题，是凭据在 DevCenter 侧的状态问题（未审核通过 / 被下线 / 已轮换）。
+
+依据：``https://doc.dandanplay.com/open/`` ``§4 请求头配置`` / ``§5 签名验证模式指南`` /
+``§6 错误处理``（页面末次更新 2026/7/20），以及官方 Swagger
+``https://api.dandanplay.net/swagger/v2/swagger.json``（直接 GET，无需鉴权）。
 
 AppId/AppSecret 的来源（**不许硬编码**）
 ----------------------------------------
@@ -83,6 +112,7 @@ __all__ = [
     "解析匹配响应", "解析搜索响应", "检查业务状态", "读凭证", "默认缓存目录",
     "官方基地址", "接口_匹配", "接口_搜索", "接口_弹幕", "哈希字节数",
     "默认缓存TTL秒", "环境变量_APPID", "环境变量_密钥", "配置键",
+    "签名原文", "算签名", "鉴权错误说明",
 ]
 
 日志 = logging.getLogger(__name__)
@@ -186,6 +216,10 @@ def 纯接口路径(路径: str) -> str:
     签名原文里的 Path 就是请求行里的那段路径。查询串**不参与**签名（否则
     ``/comment/1?withRelated=true`` 和 ``?withRelated=false`` 会是两个签名，
     而服务端只认前者），故这里按官方语义剥掉。
+
+    官方另有一句"建议路径全部使用小写字母"：那是**建议**，这里**不擅自改大小写**
+    （改了反而和服务端拼的串不一致时更难查）。:func:`生成签名头` 会在大写路径上
+    记一条 warning，出了问题能一眼看到。
     """
     文本 = str(路径 or "").strip()
     if "://" in 文本:
@@ -197,6 +231,22 @@ def 纯接口路径(路径: str) -> str:
     return 文本 if 文本.startswith("/") else "/" + 文本
 
 
+def 签名原文(app_id: str, 时间戳: int, 路径: str, app_secret: str) -> str:
+    """官方签名原文：``AppId + Timestamp + Path + AppSecret``（**纯拼接，无分隔符**）。
+
+    ``Timestamp`` 按**十进制文本**拼（官方给的 6 种语言示例都是字符串拼接）。
+    ``Path`` 走 :func:`纯接口路径`。这是纯函数：不取时钟、不碰网络，
+    所以"算法有没有写错"能离线单独钉住。
+    """
+    return f"{app_id}{int(时间戳)}{纯接口路径(路径)}{app_secret}"
+
+
+def 算签名(app_id: str, 时间戳: int, 路径: str, app_secret: str) -> str:
+    """``base64(sha256(签名原文))``，标准 base64（**不是** urlsafe、**不带** ``=`` 之外的修饰）。"""
+    原文 = 签名原文(app_id, 时间戳, 路径, app_secret)
+    return b64encode(sha256(原文.encode("utf-8")).digest()).decode("ascii")
+
+
 def 生成签名头(app_id: str, app_secret: str, 路径: str,
              时间戳: Optional[int] = None) -> dict:
     """``X-Signature = base64(sha256(AppId + Timestamp + Path + AppSecret))``。
@@ -204,11 +254,58 @@ def 生成签名头(app_id: str, app_secret: str, 路径: str,
     ⚠️ 拼接是**直接字符串相接**，中间没有任何分隔符、没有冒号；把时间戳写成
     ``str(时间戳)``（服务端按十进制文本拼）；``Path`` 见 :func:`纯接口路径`。
     返回的字典**只含 AppId/Timestamp/签名**，不含 secret。
+
+    :param 时间戳: 显式给一个 Unix **秒**级时间戳（测试用固定值；``None`` = 取现在）。
     """
     时刻 = int(time.time() if 时间戳 is None else 时间戳)
-    原文 = f"{app_id}{时刻}{纯接口路径(路径)}{app_secret}"
-    签名 = b64encode(sha256(原文.encode("utf-8")).digest()).decode("ascii")
-    return {"X-AppId": str(app_id), "X-Timestamp": str(时刻), "X-Signature": 签名}
+    路径段 = 纯接口路径(路径)
+    if 路径段 != 路径段.lower():
+        日志.warning("弹弹play：签名路径里有大写字母（%s）；官方建议全小写，"
+                   "若报 Invalid Signature 先看这里", 路径段)
+    return {"X-AppId": str(app_id), "X-Timestamp": str(时刻),
+            "X-Signature": 算签名(app_id, 时刻, 路径段, app_secret)}
+
+
+def 鉴权错误说明(服务端信息: str, 有凭证: bool = True) -> str:
+    """把服务端的 ``X-Error-Message`` 翻成**能照着做**的中文；翻不了就原样返回。
+
+    为什么必须把它当"分类"而不是"话术"：官方错误表里每个值对应**不同**的修法
+    （补头 / 对时钟 / 查密钥 / 查签名）。尤其 ``Invalid AppId`` —— 官方原文是
+    "签名验证模式下 AppId **或 AppSecret** 无效"，**不指明是哪一把**，
+    所以提示只能把两条路都写出来，不能瞎猜。
+
+    传进来的字符串**原样保留在末尾**（以后排查要靠官方原文，不能被我改写掉）。
+    """
+    原文 = str(服务端信息 or "").strip()
+    键 = 原文.lower()
+    尾部 = f"服务端原文：{原文}" if 原文 else "服务端没给 X-Error-Message"
+    if "missing authentication" in 键:
+        return ("弹弹play 要求应用鉴权，但请求头不全（" + 尾部 + "）：现在只发不带鉴权的"
+                "公开请求了。检查 数据/弹幕源.json 里的 appId/appSecret 是否都填了"
+                "（缺一个就签不了），或设环境变量 " + 环境变量_APPID + " / " + 环境变量_密钥)
+    if "invalid timestamp" in 键:
+        return ("弹弹play 判本机时间戳无效（" + 尾部 + "）：官方要求 Unix 秒、且设备时间"
+                "要与标准时间同步（偏差过大直接 403）。请校准系统时间/NTP 后重试。")
+    if "invalid appid" in 键:
+        if not 有凭证:
+            return ("弹弹play 判 AppId 无效（" + 尾部 + "）：本机**没有**配 AppId/AppSecret，"
+                    "请到 https://dev.dandanplay.com 的【应用管理】取号后写进 "
+                    "数据/弹幕源.json")
+        return ("弹弹play 判 AppId 或 AppSecret 无效（" + 尾部 + "）：按官方错误表，"
+                "**两把里有一把**在当前 AppId 下无效（签名验证模式下服务端不说是哪把）。"
+                "去 https://dev.dandanplay.com 的【应用管理】核对这个 AppId 是否存在、"
+                "应用是否已通过审核/未被下线，并把**当前生效的那把密钥**写进 "
+                "数据/弹幕源.json 的 dandanplay.appSecret（密钥 1/密钥 2 各试一次；"
+                "轮换后旧密钥会立刻失效）。")
+    if "invalid signature" in 键:
+        return ("弹弹play 判签名不匹配（" + 尾部 + "）：算法是 "
+                "base64(sha256(AppId + Timestamp + Path + AppSecret))；"
+                "重点查 Path 是不是**只含路径**（不带域名、不带 ? 后面的查询串）"
+                "以及 AppSecret 是不是那一把。")
+    if "invalid appsecret" in 键:
+        return ("弹弹play 判 AppSecret 无效（" + 尾部 + "）：AppId 没错，密钥错了或已被轮换；"
+                "把当前生效的密钥写进 数据/弹幕源.json 的 dandanplay.appSecret。")
+    return 原文
 
 
 # ---------------------------------------------------------------------------
@@ -519,15 +616,11 @@ class 弹弹play源(弹幕源):
         if int(应答.状态码) != 200:
             提示 = str((应答.头 or {}).get("X-Error-Message")
                      or (应答.头 or {}).get("x-error-message") or "")
-            if int(应答.状态码) == 403 and "Authentication" in 提示:
-                # 真机实测（2026）：**连 /match 也要求 AppId/签名**，不再是"完全公开"。
-                # 这条提示要能直接告诉用户怎么办，而不是甩一个 403。
-                raise 弹幕源错误(
-                    "弹弹play 要求应用鉴权（" + 提示 + "）：请到 "
-                    "https://dev.dandanplay.com 申请 AppId/AppSecret，"
-                    "写进 数据/弹幕源.json（{\"dandanplay\": {\"appId\": \"…\", "
-                    "\"appSecret\": \"…\"}}）或设环境变量 "
-                    "V2_DANDANPLAY_APP_ID / V2_DANDANPLAY_APP_SECRET")
+            # 403 的 X-Error-Message 是**分类**（官方错误表），翻成能照着做的中文；
+            # 别的状态码也先试一次 —— 服务端在 401 上同样会给这些值。
+            说明 = 鉴权错误说明(提示, 有凭证=self.能签名()) if 提示 else ""
+            if 说明:
+                raise 弹幕源错误(说明)
             raise 弹幕源错误(f"{方法} {纯接口路径(路径)} 返回 HTTP {应答.状态码}"
                            + (f"（{提示}）" if 提示 else "")
                            + f"：{应答.文本()[:200]}")
@@ -759,6 +852,10 @@ class 弹弹play源(弹幕源):
             参数["tmdbIdType"] = 1 if 电影 else 0
         if 词:
             参数["anime"] = 词
+        # ``v2=true`` 切到官方 2026-07-13 上线的新版搜索引擎（更好的分词/质量；
+        # 官方说稳定后会改默认开启）。**它不进签名**（签名只含路径），所以加上它
+        # 不会影响鉴权；给了万一服务端不认也只是被忽略（Swagger 里是可选 query 参数）。
+        参数["v2"] = "true"
         响应体 = self._请(接口_搜索, 方法="GET", 参数=参数)
         return 解析搜索响应(响应体, 集号)
 
