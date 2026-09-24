@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QThread, QTimer, Signal
-from PySide6.QtWidgets import QMessageBox, QProgressDialog, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QApplication, QMessageBox, QProgressDialog,
+                             QVBoxLayout, QWidget)
 
 from ..scrape.模型 import 媒体类型
 
@@ -125,6 +126,24 @@ class 媒体库页(QWidget):
             return
         本地目录们 = [x.路径 for x in 全部 if x.类型 == "本地"]
         远端单元们: list = []
+        # ---- 扫描进度：列网盘目录可能要几十秒（一个目录一次往返），
+        #      没有进度用户会以为卡死了（用户要求加这个显示）。----
+        进度框 = QProgressDialog("正在准备扫描…", "取消", 0, 0, self)
+        进度框.setWindowTitle("扫描媒体库")
+        进度框.setMinimumDuration(0)
+        进度框.setMinimumWidth(460)
+        进度框.show()
+        应用 = QApplication.instance()
+        列过 = 0
+
+        def 报进度(文本: str = "", 找到: int = 0) -> None:
+            nonlocal 列过
+            列过 += 1
+            进度框.setLabelText(f"{文本}\n已列 {列过} 个目录"
+                            f"｜网盘视频 {找到} 个｜本地文件夹 {len(本地目录们)} 个")
+            if 应用 is not None:
+                应用.processEvents()          # 让进度框真的刷新（不然是"假进度"）
+
         for 项 in 全部:
             if 项.类型 != "网盘":
                 continue
@@ -132,15 +151,27 @@ class 媒体库页(QWidget):
                 self._写日志(f"[媒体库] 没有接上网盘列目录，跳过 {项.路径}")
                 continue
             self._写日志(f"[媒体库] 正在列网盘目录：{项.网盘}:{项.路径}")
+            报进度(f"正在列网盘目录：{项.网盘}:{项.路径}")
             文件们 = 远端视频们(项.网盘, 项.路径, self._列网盘目录,
-                          进度=self._写日志)
+                          进度=lambda 文本, _f=项: (self._写日志(文本), 报进度(文本)))
             self._写日志(f"[媒体库] {项.网盘}:{项.路径} 找到 {len(文件们)} 个视频")
+            报进度(f"已扫 {项.网盘}:{项.路径}", len(文件们))
             from ..scrape.扫描 import 造远端单元
             远端单元们 += 造远端单元(项.网盘, 项.路径, 文件们)
+        进度框.setLabelText(f"扫描完成：网盘视频 {len(远端单元们)} 个、"
+                        f"本地文件夹 {len(本地目录们)} 个，开始刮削…")
+        if 应用 is not None:
+            应用.processEvents()
         if not 本地目录们 and not 远端单元们:
             self._提示("🎞 清单里的文件夹都没扫出内容（检查路径/网盘登录）")
             return
-        self._远端单元 = {str(u.路径): u for u in 远端单元们}
+        # ⚠️ 按路径收集成**列表**：一部剧的每一集都在同一个路径下，
+        #    刮削服务会把它们合并成"一部剧一个单元"（用户要求：一张海报、里面选集）。
+        分组: dict = {}
+        for u in 远端单元们:
+            分组.setdefault(str(u.路径), []).append(u)
+        self._远端单元 = 分组
+        进度框.close()
         self._提示(f"🎞 开始扫描 {len(本地目录们)} 个本地文件夹 + "
                  f"{len(远端单元们)} 个网盘视频…"
                  "（匹配得到的直接进海报墙；**拿不准的会弹「待确认」队列**让你点一下）")
@@ -196,7 +227,9 @@ class 媒体库页(QWidget):
                 try:
                     库 = 资料库()
                     缓存 = 图片缓存()
-                    单元表 = {str(u.路径): u for u in (远端单元们 or [])}
+                    单元表: dict = {}
+                    for u in (远端单元们 or []):
+                        单元表.setdefault(str(u.路径), []).append(u)
                     服务 = 刮削服务(
                         库, 客户端, 缓存, 刮削设置(),
                         进度回调=lambda p: 结果盒.setdefault("进度", p.摘要()),

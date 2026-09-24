@@ -164,11 +164,11 @@ class 刮削服务:
             self._日志(f"[刮削] {结果.摘要()}")
             for 错 in 结果.错误们:
                 self._日志(f"[刮削] {错}")
-        for 单元 in 全部:
-            if not 单元.可刮削():
-                continue
-            self.库.记任务(str(单元.路径), "待处理", None,
-                       单元.一句话())
+        from .扫描 import 合并远端单元
+        表 = self._按路径归并(全部)
+        for 路径, 组 in 表.items():
+            单元 = 合并远端单元(组) or 组[0]
+            self.库.记任务(路径, "待处理", None, 单元.一句话())
             self._记单元底稿(单元)      # 先让它出现在海报墙上（用户真机反馈）
         return len(全部), "；".join(摘要们)
 
@@ -189,29 +189,53 @@ class 刮削服务:
             条目 = 媒体条目(类型=单元.类型, 标题=单元.标题 or Path(str(主)).stem,
                          年份=单元.年份, 来源="扫描")
             if 单元.类型 is 媒体类型.剧集:
-                季号 = int(单元.季号 or 1)
-                条目.季们 = [季(季号=季号, 集们=[
-                    集(季号=季号, 集号=int(单元.集号 or 1),
-                       集号到=int(单元.集到 or 0), 文件路径=Path(str(主)))])]
+                # 把这一部剧**所有集**都建出来（不是只建第一集）：用户要在海报里
+                # 直接看到并选集，确认之前也得能列出来（真机反馈"剧集信息不显示"）。
+                from .命名解析 import 解析
+                季表: dict = {}
+                for 视频 in (单元.视频们 or [主]):
+                    名字 = Path(str(视频)).name
+                    解 = 解析(名字, 父目录名=Path(str(单元.路径)).name)
+                    季号 = int((解.季 if 解.季 is not None else 单元.季号) or 1)
+                    集号 = int((解.集 if 解.集 is not None else 单元.集号) or 1)
+                    季表.setdefault(季号, []).append(
+                        集(季号=季号, 集号=集号,
+                          集号到=int(解.集到 or 0), 文件路径=Path(str(视频))))
+                条目.季们 = [季(季号=号, 集数=len(集们), 集们=sorted(
+                    集们, key=lambda c: c.集号)) for 号, 集们 in sorted(季表.items())]
             else:
                 条目.文件路径 = Path(str(主))
             self.库.存条目(条目)
         except Exception as 错:  # noqa: BLE001
             self._日志(f"[刮削] 落底稿失败（{Path(str(主)).name}）：{错}")
 
+    @staticmethod
+    def _按路径归并(单元们) -> dict:
+        """把"一集一个"的单元按路径（= 一部剧的文件夹）归并成 {路径: [单元…]}。"""
+        表: dict = {}
+        for 单元 in 单元们 or []:
+            if 单元 is None or not 单元.可刮削():
+                continue
+            表.setdefault(str(单元.路径), []).append(单元)
+        return 表
+
     def 记远端单元(self, 单元们) -> tuple[int, str]:
         """把**网盘**里的待刮削单元登记成任务（不联网、不碰本地文件系统）。
 
         对应的本地版本是 :meth:`扫库`（它内部 `os.walk` 本地目录）。
+
+        ⚠️ 必须**按路径归并后再记**：远端扫描是"一集一个单元"，直接记会让一部剧
+        在库里冒出十几张卡片（用户真机反馈"同一部剧要一张海报"，以及"剧集信息不显示"）。
         """
+        from .扫描 import 合并远端单元
+        表 = self._按路径归并(单元们)
         登记 = 0
-        for 单元 in 单元们 or []:
-            if not 单元.可刮削():
-                continue
-            self.库.记任务(str(单元.路径), "待处理", None, 单元.一句话())
+        for 路径, 组 in 表.items():
+            单元 = 合并远端单元(组) or 组[0]
+            self.库.记任务(路径, "待处理", None, 单元.一句话())
             self._记单元底稿(单元)
             登记 += 1
-        self._日志(f"[刮削] 网盘新增 {登记} 个待刮削单元")
+        self._日志(f"[刮削] 网盘新增 {登记} 个待刮削单元（{len(单元们 or [])} 个视频）")
         return 登记, f"网盘 {登记} 个"
 
     # ---------------- 刮削 ----------------
@@ -295,8 +319,18 @@ class 刮削服务:
         return self.刮路径(路径)
 
     # ---------------- 单个单元 ----------------
+    def _取远端单元(self, 路径) -> Optional[发现条目]:
+        """从远端单元表里取出这一部剧的单元（表里可能是"一集一个"的列表）。"""
+        值 = self.远端单元.get(str(路径))
+        if not 值:
+            return None
+        if isinstance(值, (list, tuple)):
+            from .扫描 import 合并远端单元
+            return 合并远端单元(list(值))
+        return 值
+
     def _刮一个(self, 路径: Path, 结果: 服务结果) -> None:
-        单元 = self.远端单元.get(str(路径)) or self._造单元(路径)
+        单元 = self._取远端单元(路径) or self._造单元(路径)
         if 单元 is None or not 单元.视频们:
             结果.跳过 += 1
             self.库.记任务(str(路径), "成功", None, "没有可刮削的视频")
