@@ -251,3 +251,38 @@ class 独立窗口贴屏幕测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 预览只对本地源测试(unittest.TestCase):
+    """网盘直链播放时**不做**悬停预览。
+
+    为什么：预览要另开一路连接 + 另开一个解码器去读同一个直链，而网盘直链常常是
+    一次性/短时效的。真机两次 core 的崩溃线程分别是 `V2-缩略图` 与 `V2-解封装`
+    （abort 在 libavcodec 内部），现象就是"播放黑屏 + 崩溃"。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _取应用()
+
+    def test_直链不算本地源(self):
+        from wangpan.ui.播放页 import 播放页
+        页 = 播放页()
+        self.addCleanup(页.关闭)
+
+        class 假输入:
+            def __init__(self, 地址):
+                self.地址 = 地址
+
+        for 地址 in ("https://example.com/a.mkv", "http://127.0.0.1/a.mp4",
+                    "rtsp://x/y", ""):
+            页.引擎.输入 = 假输入(地址)
+            self.assertFalse(页._是本地源(), f"{地址} 不该算本地源")
+        页.引擎.输入 = 假输入(__file__)          # 一个真实存在的本地文件
+        self.assertTrue(页._是本地源(), "本地存在的文件该算本地源")
+
+    def test_默认就开着这个限制(self):
+        from wangpan.ui.播放页 import 播放页
+        页 = 播放页()
+        self.addCleanup(页.关闭)
+        self.assertTrue(页.预览仅本地, "默认必须限制预览只对本地源（稳定性优先）")

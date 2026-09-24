@@ -84,6 +84,12 @@ class 播放页(QWidget):
         self._上次状态 = ""
         #: 预览小窗现在是不是弹着的（真机测试/自检会看它）
         self._预览显示中 = False
+        #: 网盘/直链播放时**默认不做**悬停预览缩略图。
+        #: 为什么（真机两次崩溃的结论）：预览要**另开一路连接 + 另开一个解码器**去读
+        #: 同一个直链，而网盘直链常常是一次性/短时效的 —— 实测现象正是"播放黑屏 +
+        #: libavcodec 内部 abort（SIGABRT）"，两次 core 的崩溃线程分别是 `V2-缩略图`
+        #: 与 `V2-解封装`。本地文件不受影响（不走网络、随便再开一路），照常有预览。
+        self.预览仅本地 = True
         #: 缩略图任务**同一时刻只许跑一个**，且共用的解码器必须串行访问。
         #: 为什么（真机 coredump 实证）：原来每次悬停都新起一个线程，多个线程
         #: 同时喂同一个解码器 —— FFmpeg 的内部堆会被写坏，崩在 avcodec_send_packet，
@@ -812,6 +818,13 @@ class 播放页(QWidget):
         总 = self.引擎.统计.总时长秒
         if 总 <= 0 or self.引擎.输入 is None:
             return
+        if self.预览仅本地 and not self._是本地源():
+            # 说清楚为什么没预览，免得用户以为坏了（只在第一次说一遍）
+            if not getattr(self, "_说过网络不预览", False):
+                self._说过网络不预览 = True
+                self._写日志("[播放] 网盘直链不做悬停预览：预览要另开一路连接，"
+                          "会影响正在播的流（实测会导致黑屏/崩溃）。本地文件有预览。")
+            return
         秒 = 总 * self.进度.value() / 1000.0
         键 = int(秒)
         if 键 in self._预览缓存:
@@ -845,6 +858,18 @@ class 播放页(QWidget):
         self._预览忙 = True
         threading.Thread(target=干活, daemon=True, name="V2-缩略图").start()
         QTimer.singleShot(400, self._看预览结果)
+
+    def _是本地源(self) -> bool:
+        """当前播的是不是本地文件（决定能不能做悬停预览）。"""
+        try:
+            地址 = str(getattr(self.引擎.输入, "地址", "") or "")
+            if not 地址:
+                return False
+            if 地址.startswith(("http://", "https://", "rtsp://", "rtmp://")):
+                return False
+            return Path(地址).is_file()
+        except Exception:  # noqa: BLE001
+            return False
 
     def _看预览结果(self) -> None:
         结果 = getattr(self, "_预览结果", None)
