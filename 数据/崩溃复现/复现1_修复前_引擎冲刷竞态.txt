@@ -1,0 +1,66 @@
+Fatal Python error: Aborted
+
+Thread 0x00007f9a0ffff6c0 [V2-音频] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u97f3\u9891\u8f93\u51fa.py", line ??? in \u5199
+  <invalid frame>
+
+Thread 0x00007f9a24ffd6c0 [V2-视频] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u89e3\u7801.py", line 145 in \u9001\u5305
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u5f15\u64ce.py", line 615 in _\u89c6\u9891\u5faa\u73af
+  File "/usr/lib/python3.14/threading.py", line 1024 in run
+  File "/usr/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/usr/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Current thread 0x00007f9a257fe6c0 [V2-解封装] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u89e3\u7801.py", line 142 in \u51b2\u5237
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u5f15\u64ce.py", line 585 in _\u6267\u884c\u8df3\u8f6c
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/wangpan/player/\u5f15\u64ce.py", line 533 in _\u89e3\u5c01\u88c5\u5faa\u73af
+  File "/usr/lib/python3.14/threading.py", line 1024 in run
+  File "/usr/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/usr/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f9a2c5f86c0 [压力-AI重开] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/\u5de5\u5177/\u91cd\u5f00\u538b\u529b\u6d4b\u8bd5.py", line 161 in run
+  File "/usr/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/usr/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f9a2bdf76c0 [压力-GUI] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/\u5de5\u5177/\u91cd\u5f00\u538b\u529b\u6d4b\u8bd5.py", line 128 in run
+  File "/usr/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/usr/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00007f9a4bcc6bc0 [python] (most recent call first):
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/\u5de5\u5177/\u91cd\u5f00\u538b\u529b\u6d4b\u8bd5.py", line 256 in \u9636\u6bb5B_\u4f1a\u8bddAI\u91cd\u5f00
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/\u5de5\u5177/\u91cd\u5f00\u538b\u529b\u6d4b\u8bd5.py", line 396 in main
+  File "/home/xgl/python/\u7f51\u76d8\u7ba1\u7406_V2/\u5de5\u5177/\u91cd\u5f00\u538b\u529b\u6d4b\u8bd5.py", line 413 in <module>
+
+Current thread's C stack trace (most recent call first):
+  Binary file "/usr/lib/libpython3.14.so.1.0", at _Py_DumpStack+0x4d [0x7f9a4b76883a]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x169051 [0x7f9a4b769051]
+  Binary file "/usr/lib/libc.so.6", at +0x3e6f0 [0x7f9a4b23e6f0]
+  Binary file "/usr/lib/libc.so.6", at +0x9a17c [0x7f9a4b29a17c]
+  Binary file "/usr/lib/libc.so.6", at gsignal+0x20 [0x7f9a4b23e5d0]
+  Binary file "/usr/lib/libc.so.6", at abort+0x26 [0x7f9a4b225685]
+  Binary file "/usr/lib/libavcodec.so.63", at +0x902967 [0x7f9a42d02967]
+  Binary file "/usr/lib/libavcodec.so.63", at +0x7d392 [0x7f9a4247d392]
+  Binary file "/usr/lib/libavcodec.so.63", at +0x272a2 [0x7f9a424272a2]
+  Binary file "/usr/lib/libffi.so.8", at +0x8db6 [0x7f9a4b461db6]
+  Binary file "/usr/lib/libffi.so.8", at +0x4a6d [0x7f9a4b45da6d]
+  Binary file "/usr/lib/libffi.so.8", at ffi_call+0x172 [0x7f9a4b460e32]
+  Binary file "/usr/lib/python3.14/lib-dynload/_ctypes.cpython-314-x86_64-linux-gnu.so", at +0x14822 [0x7f9a4b47b822]
+  Binary file "/usr/lib/python3.14/lib-dynload/_ctypes.cpython-314-x86_64-linux-gnu.so", at +0x1158e [0x7f9a4b47858e]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x1a6632 [0x7f9a4b7a6632]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x68678 [0x7f9a4b668678]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x1e478b [0x7f9a4b7e478b]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x2359ae [0x7f9a4b8359ae]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x693f9 [0x7f9a4b6693f9]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x1e478b [0x7f9a4b7e478b]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x2359ae [0x7f9a4b8359ae]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x33cc64 [0x7f9a4b93cc64]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x65a85 [0x7f9a4b665a85]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x1e478b [0x7f9a4b7e478b]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x2359ae [0x7f9a4b8359ae]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x33c674 [0x7f9a4b93c674]
+  Binary file "/usr/lib/libpython3.14.so.1.0", at +0x33c4ac [0x7f9a4b93c4ac]
+  Binary file "/usr/lib/libc.so.6", at +0x980a2 [0x7f9a4b2980a2]
+  Binary file "/usr/lib/libc.so.6", at +0x12080c [0x7f9a4b32080c]

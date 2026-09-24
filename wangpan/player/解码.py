@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -60,6 +61,23 @@ class 音频块:
 
 
 class _基础解码器:
+    """解码器基类。
+
+    ⚠️ **一把锁 = 一个解码上下文的安全边界**（用锁）
+    ==================================================
+    libav 的 ``AVCodecContext``（尤其开了帧级多线程的）**不是线程安全的**，
+    而"界面线程逐帧看"（:meth:`播放引擎.逐帧`）和"解码线程自己收帧"必然会在同一把
+    上下文上重叠 —— 光靠"谁拥有这个解码器"的约定挡不住它。
+    真机 coredump 给的教训更直接：``avcodec_flush_buffers`` 与
+    ``avcodec_send_packet`` 并发 → ``Assertion fctx->async_lock failed``
+    （libavcodec/pthread_frame.c）→ ``abort()``，整进程 SIGABRT。
+
+    所以：**送包/收帧/取帧/冲刷/关闭都在这把锁里**（可重入，嵌套调用没问题）。
+    引擎侧再加"流世代 → 由解码线程自己冲刷"的规矩（见 ``引擎._按需冲刷``），
+    两层一起保证：同一时刻只有一个线程在动这个上下文，且冲刷只发生在
+    "新世代的第一个包"之前。
+    """
+
     def __init__(self, 绑定: B.绑定, 流: 流信息, 名字: str = "") -> None:
         self.绑定 = 绑定
         self.流 = 流
@@ -67,6 +85,10 @@ class _基础解码器:
         self.上下文 = 0
         self._帧指针 = 0
         self.已解帧数 = 0
+        #: 保护这个解码上下文的可重入锁（见类文档：为什么必须有）
+        self.用锁 = threading.RLock()
+        #: 上一次已经冲刷过的"流世代"（引擎跳转时 +1；见 引擎._按需冲刷）
+        self._已冲刷世代 = 0
 
     def 打开(self) -> None:
         库 = self.绑定
@@ -101,55 +123,67 @@ class _基础解码器:
         """收一帧并转换（逐帧步进用）；没有可收的帧时返回 None。
 
         注意：解码是异步的（要喂包才有帧），所以这里"收一次"；调用方负责喂包。
+        **收帧 + 取帧必须在同一把锁里**：中间被别人插进来收一次，
+        两个线程就会互相覆盖同一个 ``AVFrame``（帧数据撕裂 / 读到已释放的缓冲）。
         """
-        if self.收帧() < 0:
-            return None
-        return self.取帧()
+        with self.用锁:
+            if self.收帧() < 0:
+                return None
+            return self.取帧()
 
     def 关(self) -> None:
         库 = self.绑定
-        try:
-            if getattr(self, "_软件帧", 0):
-                指针 = ctypes.c_void_p(self._软件帧)
-                库.avutil.av_frame_free(ctypes.byref(指针))
-                self._软件帧 = 0
-        except Exception:  # noqa: BLE001
-            pass
-        # ⚠️ 这里**不能**自己 av_buffer_unref 设备引用：
-        #    ``AVCodecContext.hw_device_ctx`` 的所有权归上下文，
-        #    ``avcodec_free_context`` 会释放它 —— 我们再释放一次就是 double free
-        #    （实测：double free or corruption (!prev) 直接 abort）。
-        #    我们只把 Python 侧的记录清掉。
-        self._硬解设备引用 = 0
-        try:
-            if self._帧指针:
-                指针 = ctypes.c_void_p(self._帧指针)
-                库.avutil.av_frame_free(ctypes.byref(指针))
-                self._帧指针 = 0
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            if self.上下文:
-                指针 = ctypes.c_void_p(self.上下文)
-                库.avcodec.avcodec_free_context(ctypes.byref(指针))
-                self.上下文 = 0
-        except Exception:  # noqa: BLE001
-            pass
+        with self.用锁:
+            try:
+                if getattr(self, "_软件帧", 0):
+                    指针 = ctypes.c_void_p(self._软件帧)
+                    库.avutil.av_frame_free(ctypes.byref(指针))
+                    self._软件帧 = 0
+            except Exception:  # noqa: BLE001
+                pass
+            # ⚠️ 这里**不能**自己 av_buffer_unref 设备引用：
+            #    ``AVCodecContext.hw_device_ctx`` 的所有权归上下文，
+            #    ``avcodec_free_context`` 会释放它 —— 我们再释放一次就是 double free
+            #    （实测：double free or corruption (!prev) 直接 abort）。
+            #    我们只把 Python 侧的记录清掉。
+            self._硬解设备引用 = 0
+            try:
+                if self._帧指针:
+                    指针 = ctypes.c_void_p(self._帧指针)
+                    库.avutil.av_frame_free(ctypes.byref(指针))
+                    self._帧指针 = 0
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if self.上下文:
+                    指针 = ctypes.c_void_p(self.上下文)
+                    库.avcodec.avcodec_free_context(ctypes.byref(指针))
+                    self.上下文 = 0
+            except Exception:  # noqa: BLE001
+                pass
 
     def 冲刷(self) -> None:
-        """跳转后必须冲刷（否则会吐出跳转前的帧）。"""
-        if self.上下文:
-            self.绑定.avcodec.avcodec_flush_buffers(self.上下文)
+        """跳转后必须冲刷（否则会吐出跳转前的帧）。
+
+        ⚠️ **只许由"正在使用这个解码器的那条线程"调用**（现在是解码线程自己在
+        ``引擎._按需冲刷`` 里调）。跨线程调它就是 ``fctx->async_lock`` 断言 abort。
+        """
+        with self.用锁:
+            if self.上下文:
+                self.绑定.avcodec.avcodec_flush_buffers(self.上下文)
 
     def 送包(self, 包指针: int) -> int:
-        return self.绑定.avcodec.avcodec_send_packet(self.上下文, 包指针)
+        with self.用锁:
+            return self.绑定.avcodec.avcodec_send_packet(self.上下文, 包指针)
 
     def 收帧(self) -> int:
-        return self.绑定.avcodec.avcodec_receive_frame(self.上下文, self._帧指针)
+        with self.用锁:
+            return self.绑定.avcodec.avcodec_receive_frame(self.上下文, self._帧指针)
 
     def 送空包(self) -> int:
         """送 NULL 包表示"数据完了"（冲刷解码器内部的 B 帧等）。"""
-        return self.绑定.avcodec.avcodec_send_packet(self.上下文, None)
+        with self.用锁:
+            return self.绑定.avcodec.avcodec_send_packet(self.上下文, None)
 
     # 时间戳换算：帧 pts（流时间基）→ 秒
     def _帧时间(self, 帧指针: int) -> float:
@@ -389,7 +423,15 @@ class 视频解码器(_基础解码器):
             self._缓冲 = ctypes.create_string_buffer(需要 + 64)
 
     def 取帧(self) -> Optional[解码帧]:
-        """把当前收到的帧转成 RGB0（返回 None 表示这帧还没准备好）。"""
+        """把当前收到的帧转成 RGB0（返回 None 表示这帧还没准备好）。
+
+        外面套锁：``收帧`` 收到的帧放在共享的 ``AVFrame`` 里，转换（swscale）必须在
+        "同一线程收完就转"的原子区间里完成，否则会被别的线程收帧覆盖（帧撕裂/越界）。
+        """
+        with self.用锁:
+            return self._取帧_内部()
+
+    def _取帧_内部(self) -> Optional[解码帧]:
         帧指针 = self._帧指针
         源宽, 源高 = self._帧宽高(帧指针)
         if 源宽 <= 0 or 源高 <= 0:
@@ -445,6 +487,8 @@ class 音频解码器(_基础解码器):
         self._输入布局 = None
         self._缓冲 = None
         self._倍速 = 1.0
+        #: 界面登记的倍速请求（真正的重建由音频线程在安全点做，见 :meth:`_应用倍速请求`）
+        self._请求倍速 = 1.0
 
     def 打开(self) -> None:
         super().打开()
@@ -457,17 +501,27 @@ class 音频解码器(_基础解码器):
         return 布局
 
     def 设置倍速(self, 倍速: float) -> None:
-        """倍速：把"输出采样率"乘上倍速（等价于把音频缩短），需要重建重采样器。"""
-        倍速 = max(0.25, min(4.0, float(倍速 or 1.0)))
-        if abs(倍速 - self._倍速) < 0.001:
+        """倍速：把"输出采样率"乘上倍速（等价于把音频缩短），需要重建重采样器。
+
+        ⚠️ 这里**只登记请求**，不碰 ``swr``。为什么（和"跨线程冲刷"是同一类 bug）：
+        旧实现直接在界面线程里 ``swr_free``，而音频线程可能正卡在 ``swr_convert`` 里
+        用着那个重采样器 —— use-after-free，崩在 libswresample/libavcodec 内部。
+        真正的"释放旧的重采样器 + 建新的"由音频线程在 :meth:`_应用倍速请求` 里做。
+        """
+        self._请求倍速 = max(0.25, min(4.0, float(倍速 or 1.0)))
+
+    def _应用倍速请求(self) -> None:
+        """把界面登记的倍速落到重采样器上。**只能在音频线程里调用。**"""
+        请求 = float(getattr(self, "_请求倍速", 1.0) or 1.0)
+        if abs(请求 - self._倍速) < 0.001:
             return
-        self._倍速 = 倍速
+        self._倍速 = 请求
         if self.重采样器:
-            self.绑定.swresample.swr_free(__import__("ctypes").byref(
-                __import__("ctypes").c_void_p(self.重采样器)))
+            self.绑定.swresample.swr_free(ctypes.byref(ctypes.c_void_p(self.重采样器)))
             self.重采样器 = 0
 
     def _准备重采样(self, 采样率: int, 声道数: int, 格式: int) -> None:
+        self._应用倍速请求()          # 安全点：音频线程自己应用界面的倍速请求
         if self.重采样器 and (采样率, 声道数, 格式) == (self.源采样率, self.源声道,
                                                     self.源格式):
             return
@@ -494,6 +548,11 @@ class 音频解码器(_基础解码器):
             raise RuntimeError(f"{self.名字}：初始化重采样器失败")
 
     def 取块(self) -> Optional[音频块]:
+        """把当前收到的音频帧重采样成 S16 立体声（外面套锁，理由同视频取帧）。"""
+        with self.用锁:
+            return self._取块_内部()
+
+    def _取块_内部(self) -> Optional[音频块]:
         帧指针 = self._帧指针
         样本数 = B.读i32(帧指针, "AVFrame", "nb_samples")
         if 样本数 <= 0:

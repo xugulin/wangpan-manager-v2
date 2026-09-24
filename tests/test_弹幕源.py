@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.parse
 import time
 import unittest
 from base64 import b64encode
@@ -458,6 +459,13 @@ class 匹配接口测试(unittest.TestCase):
             self.assertEqual(体["matchMode"], "fileNameOnly")
 
     def test_手动搜索(self):
+        """搜索是 ``GET /api/v2/search/episodes``（查询参数），不是 ``POST /api/v2/search``。
+
+        为什么改：``POST /api/v2/search`` 在官方 v2 里**根本没有这个路由**（真机实测
+        404；假传输的单测看不出来，因为它不校验路由）。官方 Swagger 里只有
+        ``GET /api/v2/search/episodes``（可按 anime / tmdbId 查）与
+        ``GET /api/v2/search/anime``。
+        """
         with 临时目录() as 目录:
             假 = 假传输({"success": True, "errorCode": 0, "animes": [
                 {"animeId": 5, "animeTitle": "某番", "type": "tvseries",
@@ -468,7 +476,30 @@ class 匹配接口测试(unittest.TestCase):
             self.assertEqual([候.标识 for 候 in 全部], ["11", "12"])
             第二集 = 源.搜索("某番", 集号=2)
             self.assertEqual([候.标识 for 候 in 第二集], ["12"])
-            self.assertEqual(假.最后一个体()["anime"], "某番")
+            self.assertEqual(假.请求们[-1].方法, "GET")
+            查询 = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(假.最后一个网址()).query))
+            self.assertEqual(查询["anime"], "某番")
+            self.assertEqual(查询["episode"], "2")
+            self.assertTrue(假.最后一个网址().startswith(
+                "https://api.dandanplay.net/api/v2/search/episodes?"))
+
+    def test_按TMDBid搜索(self):
+        """资料库给的 TMDB id 可以**精确查**（tmdbIdType：0=剧、1=电影）。"""
+        with 临时目录() as 目录:
+            假 = 假传输({"success": True, "errorCode": 0, "animes": []})
+            源 = 造源(假, Path(目录))
+            源.搜索("", 集号=7, 标识="223911")
+            查询 = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(假.最后一个网址()).query))
+            self.assertEqual(查询["tmdbId"], "223911")
+            self.assertEqual(查询["tmdbIdType"], "0")
+            self.assertEqual(查询["episode"], "7")
+            源.搜索("某电影", 标识="438631", 电影=True)
+            查询 = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(假.最后一个网址()).query))
+            self.assertEqual(查询["tmdbIdType"], "1", "电影要给 1")
+            self.assertEqual(查询["anime"], "某电影")
 
 
 # ---------------------------------------------------------------------------

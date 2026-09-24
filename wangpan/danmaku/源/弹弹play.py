@@ -8,7 +8,8 @@
 * 基地址 ``https://api.dandanplay.net``；
 * ``POST /api/v2/match``                    —— 按文件找节目（hash + 文件名）；
 * ``GET  /api/v2/comment/{episodeId}``      —— 取某一集的弹幕；
-* ``POST /api/v2/search``                   —— 手动搜索（界面上"搜错了，我自己找"）。
+* ``GET  /api/v2/search/episodes``          —— 按作品名/TMDB id 搜索（"搜错了，我自己找"，
+  也是②"用刮削结果取弹幕"那条路：名字可能被译得不一样，TMDB id 不会）。
 
 鉴权（签名验证模式）
 --------------------
@@ -96,8 +97,13 @@ __all__ = [
 接口_匹配 = "/api/v2/match"
 #: 某集的弹幕（后面接 episodeId）
 接口_弹幕 = "/api/v2/comment/"
-#: 手动搜索
-接口_搜索 = "/api/v2/search"
+#: 按作品名/节目名搜索（**GET**，查询参数 ``anime`` / ``episode`` / ``tmdbId``）。
+#: ⚠️ 原来写的是 ``POST /api/v2/search`` —— 那个路由在官方 v2 里**不存在**（实测 404，
+#: 拿假传输的单测看不出来）。官方 Swagger（``https://api.dandanplay.net/swagger/v2/swagger.json``）
+#: 里搜索只有 ``/api/v2/search/episodes``（GET，可按 anime 或 **tmdbId** 查）与
+#: ``/api/v2/search/anime``（GET）。这里用前者：它一次就能给出"作品 + 那一集的
+#: episodeId"，正是取弹幕要的东西。
+接口_搜索 = "/api/v2/search/episodes"
 
 #: fileHash 只算前 16MB（官方规定；别整文件读，几百 MB 的视频会白读一遍盘）
 哈希字节数 = 16 * 1024 * 1024
@@ -351,7 +357,7 @@ def 解析匹配响应(响应体: dict, 素材: Optional[素材信息] = None) -
 
 
 def 解析搜索响应(响应体: dict, 集号: Optional[int] = None) -> list[匹配结果]:
-    """``/api/v2/search`` 的响应 → 候选列表（手动搜索用）。
+    """``GET /api/v2/search/episodes`` 的响应 → 候选列表（按作品名/TMDB id 搜索用）。
 
     ``集号`` 给了且在这一部里找得到，就只留那一集；找不到就整部都放出来
     （用户自己挑比我们猜错强）。
@@ -588,16 +594,28 @@ class 弹弹play源(弹幕源):
         return True
 
     def 匹配(self, 素材: 素材信息) -> list[匹配结果]:
-        """``POST /api/v2/match``：``hashAndFileName`` 最准，缺哈希/缺文件名时降级。
+        """有资料库身份就**按作品名搜**；没有身份才退回 ``/api/v2/match``（文件名/哈希）。
 
-        请求体（官方）::
+        为什么要分这两条路（用户原话："文件名不可信，用户会乱放文件夹乱改名"）：
+        ``/match`` 是按"文件名 + 文件哈希"找节目的 —— 文件被改成
+        ``146.SDR.8bit.2160p…mp4`` 时（真机实例），它能匹配到的自然和片子不沾边。
+        刮削之后我们知道这部作品叫什么（中文名/原名）、是第几季第几集，就该用**这些**去搜。
 
-            {"fileName": 不含目录与扩展名的文件名, "fileHash": 前16MB的MD5,
-             "fileSize": 字节数, "videoDuration": 秒, "matchMode": "hashAndFileName"}
-
-        ``matchMode`` 可选 ``hashAndFileName|fileNameOnly|hashOnly``：网盘上还没下载
-        的文件（没路径）就只能 ``fileNameOnly``，这时算哈希是算不出来的。
+        为什么搜不到时**不**回落 ``/match``：那等于把"乱改名"的坑又放回来，
+        给出一部不相干的片子的弹幕比"没找到"更糟（用户会以为是我们匹配错了）。
+        真要兜底也由上层（库里本来就没身份）决定。
         """
+        if 素材.来自资料库 and (素材.搜索词们 or 素材.标识):
+            出 = self._按作品名搜(素材)
+            if 出:
+                依据 = str((出[0].原始 or {}).get("按作品名搜") or "")
+                日志.info("弹弹play：按资料库身份搜到 %d 条候选（依据 %s）", len(出), 依据)
+                return 出
+            日志.info("弹弹play：按资料库身份（%s）没搜到；**不用文件名兜底**"
+                     "（文件名不可信，改了名会搜到别的片子）",
+                     "／".join(素材.搜索词们) or f"tmdb:{素材.标识}")
+            return []
+
         文件名 = 素材.无扩展名
         哈希 = str(素材.额外.get("fileHash") or "")
         if not 哈希 and self.读哈希 and 素材.可读文件():
@@ -614,6 +632,53 @@ class 弹弹play源(弹幕源):
              "videoDuration": int(round(float(素材.时长秒 or 0.0))), "matchMode": 模式}
         响应体 = self._请(接口_匹配, 方法="POST", 体=体)
         return 解析匹配响应(响应体, 素材)
+
+    def _按作品名搜(self, 素材) -> list[匹配结果]:
+        """按**资料库身份**搜：先用 TMDB id 精确查，再用中文名/原名搜。
+
+        为什么先 TMDB id：名字会被译得五花八门（中文名/罗马字/英译），TMDB id 不会；
+        官方搜索接口就支持 ``tmdbId``（本函数引用的参数名来自官方 Swagger）。
+        两个词都试是第二道保险：中文名搜不到时原名还能兜住（反之亦然）。
+        集号只能有一个来源 —— 库里的季集；拿文件名里的数字当集号是最容易错的地方
+        （真机那个文件叫 ``146…``，而库里那一集其实是别的集号）。
+        """
+        集号 = 素材.集号
+        电影 = str(素材.额外.get("类型") or "") == "movie"
+        出: list[匹配结果] = []
+        见过: set[str] = set()
+        最后一个错: Optional[Exception] = None
+        记号 = ""
+
+        def 收(这批, 依据: str) -> None:
+            for 候 in 这批:
+                if 候.标识 in 见过:
+                    continue
+                见过.add(候.标识)
+                # 标上"这条是按什么搜来的"：上层（待确认队列/日志）能看出依据
+                候.原始 = dict(候.原始 or {})
+                候.原始["按作品名搜"] = 依据
+                出.append(候)
+
+        次序: list[tuple[str, str]] = []
+        if 素材.标识:
+            次序.append(("", f"tmdb:{素材.标识}"))
+        次序.extend((词, 词) for 词 in 素材.搜索词们)
+        for 词, 依据 in 次序:
+            try:
+                这批 = self.搜索(词, 集号, 标识=素材.标识 if not 词 else "",
+                                电影=电影)
+            except 弹幕源错误 as 错:      # 网络/凭据问题：记下来，别的词还能试
+                最后一个错 = 错
+                日志.warning("弹弹play：按「%s」搜索失败：%s", 依据, 错)
+                continue
+            if 这批:
+                收(这批, 依据)
+                记号 = 依据
+                if 依据.startswith("tmdb:"):
+                    break                # TMDB id 命中了就不必再按名字猜
+        if not 出 and 最后一个错 is not None and len(次序) == 1:
+            raise 最后一个错
+        return 出
 
     def 取弹幕(self, 标识: str) -> 弹幕池:
         """取某一集的弹幕：**缓存 → 在途合并 → 真请求**。
@@ -676,13 +741,25 @@ class 弹弹play源(弹幕源):
         self._写缓存(键, 响应体)
         return 池
 
-    def 搜索(self, 关键词: str, 集号: Optional[int] = None) -> list[匹配结果]:
-        """``POST /api/v2/search``：自动匹配不中时让人手动找（界面上的"搜一下"）。"""
+    def 搜索(self, 关键词: str, 集号: Optional[int] = None, *,
+            标识: str = "", 电影: bool = False) -> list[匹配结果]:
+        """``GET /api/v2/search/episodes``：按作品名（或 TMDB id）找那一集。
+
+        :param 标识: 非空时优先用 **tmdbId** 精确查（``tmdbIdType``：0=电视剧、1=电影）。
+            这是"用刮削结果取弹幕"最准的一条路 —— 名字可能被译得不一样，
+            TMDB id 不会（来源：官方 Swagger 的 ``/api/v2/search/episodes`` 参数表）。
+        """
         词 = str(关键词 or "").strip()
-        if not 词:
+        标识 = str(标识 or "").strip()
+        if not 词 and not 标识:
             raise 弹幕源错误("搜索关键词不能为空")
-        响应体 = self._请(接口_搜索, 方法="POST",
-                        体={"anime": 词, "episode": "" if 集号 is None else str(集号)})
+        参数 = {"episode": "" if 集号 is None else str(集号)}
+        if 标识:
+            参数["tmdbId"] = 标识
+            参数["tmdbIdType"] = 1 if 电影 else 0
+        if 词:
+            参数["anime"] = 词
+        响应体 = self._请(接口_搜索, 方法="GET", 参数=参数)
         return 解析搜索响应(响应体, 集号)
 
     def 关闭(self) -> None:

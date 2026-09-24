@@ -115,6 +115,14 @@ class 播放页(QWidget):
         self._定时器.setInterval(16)
         self._定时器.timeout.connect(self._刷新)
         self._定时器.start()
+        #: 窗口搬动中（独立窗口搬进/搬出）：见 :meth:`标记窗口搬动`
+        self._窗口搬动中 = False
+        self._上次安全点 = None
+        # 把"现在能不能自动重开"的判据交给会话（默认是"随时都行"）
+        try:
+            self.会话.安全点查询 = self._是安全点
+        except Exception:  # noqa: BLE001
+            pass
         self._存档定时器 = QTimer(self)
         self._存档定时器.setInterval(5000)
         self._存档定时器.timeout.connect(self.存档位置)
@@ -214,7 +222,8 @@ class 播放页(QWidget):
 
         self.找弹幕按钮 = QPushButton("⬇ 找弹幕")
         self.找弹幕按钮.setToolTip(
-            "按文件名找这一集的弹幕：Animeko 公益源（零凭据）→ 弹弹play → 本地同名文件；"
+            "**按刮削结果**找这一集的弹幕（资料库里的标题/原名/季/集 → Animeko 公益源 → "
+            "弹弹play → 本地同名文件）；库里还没有这条记录时才退回文件名（可能不准）。"
             "记住的匹配下次打开会自动装")
         self.找弹幕按钮.clicked.connect(self.装载弹幕)
         行.addWidget(self.找弹幕按钮)
@@ -637,31 +646,34 @@ class 播放页(QWidget):
             self._提示(f"🗨 弹幕不透明度 {透明}%")
 
     def 装载弹幕(self) -> None:
-        """按当前片名找这一集的弹幕（Animeko → 弹弹play → 本地同名）。"""
+        """按**资料库里的识别结果**找这一集的弹幕（Animeko → 弹弹play → 本地同名）。
+
+        为什么不再"按文件名找"（用户原话：文件名不可信 —— 用户会乱放文件夹乱改名）：
+        真机上那一集叫 ``146.SDR.8bit.2160p…mp4`` 且目录名不带剧名，拿这个去搜弹幕源
+        只会搜到和片子不沾边的东西。刮削之后资料库上明明有 TMDB id / 中文名 / 原名 /
+        季 / 集，所以顺序是：**先查资料库身份**（``wangpan.danmaku.库身份``）；
+        库里没有（还没刮削）才退回文件名，并且把"这是兜底、可能不准"写进日志与提示。
+        """
         if self.引擎.输入 is None:
             self._提示("先播一个片子，再点「找弹幕」")
             return
+        from ..danmaku.库身份 import 造素材
         from ..danmaku.源 import 建默认源
         from ..danmaku.源.接口 import 素材信息
         地址 = str(self.引擎.输入.地址)
-        # ⚠️ 必须先把文件名解析出"季/集"再送去匹配：只给文件名时匹配打分拿不到集号，
-        #    分数压在 78 上下、还要人工确认，甚至可能选中特别篇（真机实测踩过）。
         路径 = Path(地址) if Path(地址).is_file() else None
-        标题, 季号, 集号, 附属 = "", None, None, {}
+        会话远端路径 = str(getattr(self.会话, "远端路径", "") or "")
+        会话网盘 = str(getattr(self.会话, "网盘标识", "") or "")
         try:
-            from ..scrape.命名解析 import 解析 as 解析文件名
-            解析结果 = 解析文件名(Path(地址).name,
-                            父目录名=路径.parent.name if 路径 else "",
-                            季目录名=路径.parent.name if 路径 else "")
-            标题 = 解析结果.标题 or ""
-            季号, 集号 = 解析结果.季, 解析结果.集
-            附属 = {"集标题": "", "季号": 季号, "集号": 集号}
-        except Exception as 错:  # noqa: BLE001
-            self._写日志(f"[弹幕] 文件名解析失败（不影响继续找）：{错}")
-        素材 = 素材信息(路径=路径, 文件名=Path(地址).name,
-                    时长秒=self.引擎.统计.总时长秒, 标题=标题,
-                    季号=季号, 集号=集号, 额外=附属)
-        self._提示("🗨 正在找弹幕…")
+            素材, 说明 = 造素材(
+                路径, 文件名=Path(地址).name, 远端路径=会话远端路径, 网盘标识=会话网盘,
+                时长秒=self.引擎.统计.总时长秒, 日志回调=self._写日志)
+        except Exception as 错:  # noqa: BLE001 - 造素材失败不能把播放页搞崩
+            self._写日志(f"[弹幕] 造素材失败，改用文件名：{错}")
+            素材 = 素材信息(路径=路径, 文件名=Path(地址).name,
+                        时长秒=self.引擎.统计.总时长秒, 标题=Path(地址).stem)
+            说明 = "用文件名兜底（可能不准）"
+        self._提示(f"🗨 正在找弹幕…（{说明}）")
         应用 = QApplication.instance()
         if 应用 is not None:
             应用.processEvents()
@@ -803,13 +815,49 @@ class 播放页(QWidget):
 
     def _开始拖(self) -> None:
         self._拖动中 = True
+        # 拖动期间"换参数自动重开"要排队（见 播放会话._安排重开）：
+        # 一边拖进度条一边被后台线程重开 = 同一个播放被两处同时改（真机崩溃现场）
+        self._刷新安全点标记()
 
     def _结束拖(self) -> None:
         self._拖动中 = False
+        self._刷新安全点标记()
         self._收起预览()
         总 = float(self.引擎.统计.总时长秒 or 0.0)
         if 总 > 0:
             self.跳转(总 * self.进度.value() / 1000.0)
+
+    # ------------------------------------------------------------------ 重开安全点
+
+    def _是安全点(self) -> bool:
+        """现在能不能让后台线程"换参数重开"（自动调优走的路径）。
+
+        不安全的两种情况：用户正**拖着进度条**（界面线程正在改播放位置）、
+        或者正把播放页**搬进/搬出独立窗口**（``setParent`` + resize 会连着触发
+        设置输出尺寸/重建控件）。这两种时候硬插一次 ``打开``，
+        就是"三条线程同时改同一个播放"——真机 22:04:08 的崩溃正是这个组合。
+        """
+        return not self._拖动中 and not getattr(self, "_窗口搬动中", False)
+
+    def _刷新安全点标记(self) -> None:
+        """把"我在不在安全点"告诉会话（只在变化时写，省得每帧都动）。"""
+        现在 = self._是安全点()
+        if getattr(self, "_上次安全点", None) == 现在:
+            return
+        self._上次安全点 = 现在
+        try:
+            self.会话.安全点查询 = self._是安全点
+        except Exception:  # noqa: BLE001
+            pass
+
+    def 标记窗口搬动(self, 进行中: bool) -> None:
+        """独立窗口搬进/搬出时由 ``播放器窗口`` 调：这段时间内不许自动重开。
+
+        ``setParent`` 会让视频控件重建、连续触发 resize（→ 设置输出尺寸），
+        此时再叠一次"换参数重开"就是往火里浇油。
+        """
+        self._窗口搬动中 = bool(进行中)
+        self._刷新安全点标记()
 
     def _出预览图(self) -> None:
         """在**工作线程**里解一帧缩略图（界面线程里解码会卡界面）。"""
@@ -959,6 +1007,12 @@ class 播放页(QWidget):
             self.播放状态变了.emit(状态)
         if self.引擎.是否结束():
             self.播放按钮.setText("▶ 重播")
+        # 排队中的"换参数重开"：到底安全点了没有？安全了就在这里做掉
+        # （自动重开由后台诊断线程发起，但**落地在界面线程的安全点上**）
+        try:
+            self.会话.推进待办()
+        except Exception:  # noqa: BLE001 - 重开失败不该把界面刷新打断
+            pass
 
     def _视频区变了(self, 宽: int, 高: int) -> None:
         """视频区尺寸变了 → 告诉引擎"界面只需要这么大"。

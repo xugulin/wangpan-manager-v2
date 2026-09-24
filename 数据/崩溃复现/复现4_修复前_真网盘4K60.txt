@@ -1,0 +1,45 @@
+项目根：/tmp/v2_prefix
+Python：/home/xgl/python/网盘管理_V2/运行环境/venv/bin/python
+崩溃栈会写进：/tmp/v2_prefix/数据/重开压力_崩溃栈.txt
+直链（外部给）：https://qd02-httpdown.guangyacdn.com/download/｜带 0 个头
+起播参数：缓存 2000ms｜硬解 自动｜规则｜带宽是码率的 3.3 倍，缓存放小起播更快｜缓冲 4.8MB
+压迫动作：{'间隔': 0.05, '压迫跳转': True, '压迫倍速': False, '压迫暂停': True, '压迫尺寸': True, '跳转间隔秒': 0.8}
+
+===== 阶段 A：引擎直开 ×12（每轮约 2.5s）=====
+    · [网络] 走网络播放：https://qd02-httpdown.guangyacdn.com/download/?fid+…（14 个参数）
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x5642858e2e40] stream 0, timescale not set
+    · [播放] 已打开：视频#0 hevc 3840x1632 59.9fps、音频#1 aac 48000Hz 2声道、视频#2 png 1536x1024 0fps｜时长 1297.0s
+    · [播放] 跳到 228.4s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 跳到 196.7s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 跳到 73.5s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 跳到 127.4s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+[A1/12] 暂停｜127.4/1297.0s｜60fps｜丢帧 13/14｜34.6Mbps｜VAAPI 硬解（/dev/dri/renderD128）（硬解帧 14）｜输出 1600x680｜PulseAudio（libpulse-simple）｜线程[V2-解封装、V2-视频、V2-音频]｜本轮解出 14 帧｜压迫 跳转8/暂停21/倍速0/尺寸19｜5.7s
+[A1] 停止后 V2 线程：无
+    · [网络] 走网络播放：https://qd02-httpdown.guangyacdn.com/download/?fid+…（14 个参数）
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x5642858e2e40] stream 0, timescale not set
+    · [播放] 已打开：视频#0 hevc 3840x1632 59.9fps、音频#1 aac 48000Hz 2声道、视频#2 png 1536x1024 0fps｜时长 1297.0s
+    · [播放] 跳到 69.9s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 跳到 46.3s（成功）
+    · [播放] 跳到 34.4s（成功）
+    · [播放] 已暂停
+    · [播放] 已暂停
+    · [播放] 已暂停
+Assertion fctx->async_lock failed at libavcodec/pthread_frame.c:171
+timeout: 被监视的命令已核心转储
+退出码=134

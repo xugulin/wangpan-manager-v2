@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from PySide6.QtGui import QImage
@@ -22,7 +23,15 @@ __all__ = ["缩略图器"]
 
 
 class 缩略图器:
-    """按需出图（用完自己收尾；同一实例可复用，避免反复打开输入）。"""
+    """按需出图（用完自己收尾；同一实例可复用，避免反复打开输入）。
+
+    ⚠️ 内部一把锁（``_锁``）：这个实例是**跨悬停复用**的（``_输入``/``_解码器``
+    都留在实例上），真机上就出过"两个线程同时喂同一个解码器 → 堆被写坏 →
+    崩在 ``avcodec_send_packet``（崩溃线程 `V2-缩略图`）"。
+    界面那边已经有 ``_预览锁`` 串行化了，这里再加一层同源保险：
+    **取图和关闭（会释放输入/解码器）绝不并发** —— 释放排在"没人在用"之后，
+    这条规矩和播放引擎那边是同一条。
+    """
 
     def __init__(self, 地址: str, 请求头: Optional[dict] = None,
                  宽: int = 320, 日志回调=None) -> None:
@@ -32,6 +41,7 @@ class 缩略图器:
         self._日志 = 日志回调 or (lambda _t: None)
         self._输入: Optional[输入] = None
         self._解码器: Optional[视频解码器] = None
+        self._锁 = threading.RLock()
 
     # ---------------- 内部 ----------------
 
@@ -59,19 +69,29 @@ class 缩略图器:
             return False
 
     def 关闭(self) -> None:
-        for 部件 in (self._解码器, self._输入):
-            try:
-                if 部件 is not None:
-                    部件.关() if hasattr(部件, "关") else 部件.关闭()
-            except Exception:  # noqa: BLE001
-                pass
-        self._解码器 = None
-        self._输入 = None
+        """释放这一路的输入/解码器。**前提：没有别的线程正在取图**（靠 ``_锁``）。"""
+        with self._锁:
+            for 部件 in (self._解码器, self._输入):
+                try:
+                    if 部件 is not None:
+                        部件.关() if hasattr(部件, "关") else 部件.关闭()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._解码器 = None
+            self._输入 = None
 
     # ---------------- 对外 ----------------
 
     def 取图(self, 秒: float) -> Optional[QImage]:
-        """取目标时间点的缩略图（失败返回 None，绝不影响正在播的画面）。"""
+        """取目标时间点的缩略图（失败返回 None，绝不影响正在播的画面）。
+
+        整段（seek → 喂包 → 收帧）都在 ``_锁`` 里：这个解码器是跨调用复用的，
+        两个线程同时用它会把 FFmpeg 的内部堆写坏（真机 coredump 实证）。
+        """
+        with self._锁:
+            return self._取图_内部(秒)
+
+    def _取图_内部(self, 秒: float) -> Optional[QImage]:
         if not self._准备() or self._输入 is None or self._解码器 is None:
             return None
         try:

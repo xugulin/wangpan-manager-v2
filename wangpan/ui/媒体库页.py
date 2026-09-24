@@ -17,13 +17,44 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QMessageBox, QProgressDialog,
                              QVBoxLayout, QWidget)
 
 from ..scrape.模型 import 媒体类型
 
-__all__ = ["媒体库页"]
+__all__ = ["媒体库页", "进度文案"]
+
+
+class _进度信使(QObject):
+    """把**刮削线程**里的进度回调排队送进界面线程。
+
+    为什么需要它：`刮削服务` 在线程池/QThread 里跑，回调是在那个线程里调的；
+    在那里直接 `setValue/setLabelText` 属于跨线程碰控件（Qt 明确禁止，真机上会偶发崩）。
+    用一个建在界面线程的 QObject 发信号，Qt 会自动用**队列连接**把槽丢回界面线程执行。
+    """
+
+    收到 = Signal(object)
+
+
+def 进度文案(进度, 阶段: str = "") -> str:
+    """进度框上那一行字：**已处理 X/Y**（用户要看的是这个，不是卡在 "0/1"）。
+
+    为什么抽成独立函数：这是"用户看到的进度"唯一的一处解释，能直接单测
+    （``tests/test_刮削进度.py``），不必真去开一个 QProgressDialog。
+    数字含义：``已完成/总数`` 数的是**视频单元**（一集算一个），见
+    :class:`~wangpan.scrape.服务.刮削进度`。
+    """
+    总数 = max(0, int(getattr(进度, "总数", 0) or 0))
+    已完成 = max(0, int(getattr(进度, "已完成", 0) or 0))
+    百分比 = (已完成 / 总数 * 100.0) if 总数 else 0.0
+    尾巴 = "｜".join(x for x in (str(阶段 or getattr(进度, "说明", "") or ""),
+                              str(getattr(进度, "当前", "") or "")) if x)
+    return (f"已处理 {已完成}/{总数}（{百分比:.0f}%）"
+            f"｜成功 {max(0, int(getattr(进度, '成功', 0) or 0))}"
+            f"｜待确认 {max(0, int(getattr(进度, '需要确认', 0) or 0))}"
+            f"｜失败 {max(0, int(getattr(进度, '失败', 0) or 0))}"
+            + (f"｜{尾巴}" if 尾巴 else ""))
 
 
 class 媒体库页(QWidget):
@@ -219,8 +250,21 @@ class 媒体库页(QWidget):
         进度框 = QProgressDialog("正在扫描…", "取消", 0, 0, self)
         进度框.setWindowTitle("刮削中")
         进度框.setMinimumDuration(0)
+        进度框.setMinimumWidth(520)
+        # ⚠️ 必须关掉 autoClose/autoReset：进度到 100% 时 Qt 会把进度框**自动关掉**
+        #    并把值 reset 成 -1 —— 而"登记/识别"这一段就会先走到 100%（它的分母也是
+        #    视频数），于是刮削那一段（真正耗时的那段）用户什么都看不到，
+        #    只看见对话框自己消失（真机复验时采样到 setValue(-1)、之后一直不可见）。
+        #    收尾时由 `收尾()` 显式关框，所以关掉自动关是安全的。
+        进度框.setAutoClose(False)
+        进度框.setAutoReset(False)
         进度框.show()
         结果盒: dict = {}
+        #: 后台线程写、界面线程读的**进度快照**（`刮削进度.快照()` 的副本）。
+        #  ⚠️ 原来是 `结果盒.setdefault("进度", p.摘要())` —— setdefault 只在第一次
+        #  写进去，于是进度框**永远显示第一次那个"0/1（0%）"**（用户真机截图）。
+        #  现在存的是对象副本（线程安全的读法），由定时器换算成百分比。
+        进度盒: dict = {}
 
         class 干活(QThread):
             def run(自己):
@@ -232,15 +276,22 @@ class 媒体库页(QWidget):
                         单元表.setdefault(str(u.路径), []).append(u)
                     服务 = 刮削服务(
                         库, 客户端, 缓存, 刮削设置(),
-                        进度回调=lambda p: 结果盒.setdefault("进度", p.摘要()),
+                        # ⚠️ 进度回调是在**刮削线程**里调的，直接碰控件是未定义行为。
+                        # 所以这里只把快照 emit 出去 —— Qt 的跨线程信号会自动排队到
+                        # 界面线程再执行槽（见下面 `刷新进度`）。
+                        进度回调=lambda p: 信使.收到.emit(p),
                         日志回调=日志回调,
                         远端单元=单元表)
+                    # ③ 用户要求"扫描时直接对文件识别，不要对文件夹识别（避免用户乱放
+                    # 文件夹）"：走**按文件识别**那条通道（一个视频一个单元 → 识别 →
+                    # 按识别出的作品归并）。它内部与刮削用的是同一条识别链，识别结果会
+                    # 写回单元，`续跑` 直接按 ID 取详情，不会重搜一遍。
                     if 本地目录们:
-                        服务.扫库(list(本地目录们))
+                        服务.扫库按文件(list(本地目录们))
                     elif 路径:
-                        服务.扫库([路径])
+                        服务.扫库按文件([路径])
                     if 远端单元们:
-                        服务.记远端单元(远端单元们)
+                        服务.记远端单元按文件(远端单元们)
                     if 强制标识:
                         结果盒["结果"] = 服务.刮路径(路径, 强制标识, 强制类型)
                     else:
@@ -254,10 +305,35 @@ class 媒体库页(QWidget):
 
         线程 = 干活(self)
         self._刮削线程 = 线程
+        信使 = _进度信使()
+        # ⚠️ 为什么用信号而不是"每 400ms 轮询一次快照"：一部剧的"识别 + 挂文件"是**本地**
+        # 计算，16 集几十毫秒就跑完 —— 400ms 轮询根本采不到中间那些 1/16、2/16，
+        # 界面看起来还是"0 直接到 100"（真机复验时实测到：进度框只被喂了最后一帧）。
+        # 信号是**每次回调都送**，所以每挂上一集界面就动一格。
         定时 = QTimer(self)
-        定时.setInterval(400)
-        定时.timeout.connect(lambda: 进度框.setLabelText(
-            str(结果盒.get("进度") or "正在扫描…")))
+        定时.setInterval(400)          # 只当兜底（顺便刷新"用时 xx.x s"）
+
+        def 刷新进度(快照=None) -> None:
+            """把最新的进度快照画到进度框上：**真实百分比 + 真数字**。"""
+            if 快照 is None:
+                快照 = 进度盒.get("快照")
+            else:
+                进度盒["快照"] = 快照
+            if 快照 is None:
+                进度框.setLabelText("正在准备扫描…")
+                return
+            总数 = max(0, int(getattr(快照, "总数", 0) or 0))
+            已完成 = max(0, int(getattr(快照, "已完成", 0) or 0))
+            if 总数:
+                进度框.setRange(0, 总数)
+                进度框.setValue(min(已完成, 总数))
+            else:
+                # 还不知道总数（登记之前的空档）→ 不确定态，别显示一个假的 0%
+                进度框.setRange(0, 0)
+            进度框.setLabelText(进度文案(快照))
+
+        信使.收到.connect(刷新进度)
+        定时.timeout.connect(刷新进度)
         定时.start()
         进度框.canceled.connect(lambda: self._写日志("[刮削] 用户取消（本批跑完会停）"))
 
@@ -265,6 +341,11 @@ class 媒体库页(QWidget):
             定时.stop()
             进度框.close()
             self.刷新()
+            快照 = 进度盒.get("快照")
+            if 快照 is not None:
+                # 收尾时把最后一格进度写进日志：界面上的进度框一关就看不见了，
+                # 但"到底处理了几条 / 成功几条"得留个痕（排查"看着卡住"时全靠它）。
+                self._写日志("[刮削] " + 进度文案(快照))
             结果 = 结果盒.get("结果")
             待确认数 = int(结果盒.get("待确认") or 0)
             self._提示("🎞 刮削完成：" + (结果.摘要() if 结果 else

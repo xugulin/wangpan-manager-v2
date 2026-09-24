@@ -174,6 +174,11 @@ class 素材信息:
 
     ``路径`` 与 ``文件名`` 二者至少有其一：只给路径时文件名自动从路径取；
     只有文件名（比如网盘条目还没下载）也能走"按文件名匹配"。
+
+    **资料库身份（② 的落点）**：``来自资料库=True`` 时，``标题``/``原名``/``标识``/
+    ``季号``/``集号`` 都来自资料库（= 刮削后的 TMDB 身份），源必须**优先按这些去搜**，
+    不许再信文件名 —— 用户会把文件乱改名/乱放目录，文件名搜出来的"别的片子"比没搜到更糟。
+    库里没有这条路径时（还没刮削）才退回文件名，调用方要在日志里说明这是兜底。
     """
 
     路径: Optional[Path] = None
@@ -184,6 +189,13 @@ class 素材信息:
     集号: Optional[int] = None
     季号: Optional[int] = None
     额外: dict = field(default_factory=dict)
+    #: 资料库给的 TMDB id（没有就是空串）——源可以用它做"这部作品我搜过"的缓存键
+    标识: str = ""
+    #: 资料库给的**原名**（TMDB 的 original_name/title）：中文名搜不到时用它再搜一遍
+    原名: str = ""
+    年份: Optional[int] = None
+    #: 这份身份是不是从资料库来的（决定"按作品名搜"还是"按文件名 match"）
+    来自资料库: bool = False
 
     def __post_init__(self) -> None:
         if self.路径 is not None and not isinstance(self.路径, Path):
@@ -192,6 +204,20 @@ class 素材信息:
             self.文件名 = self.路径.name
         self.大小 = int(self.大小 or 0)
         self.时长秒 = float(self.时长秒 or 0.0)
+
+    @property
+    def 搜索词们(self) -> list[str]:
+        """按作品名搜索时要试的词：中文名优先，再原名（两个都试，命中率更高）。
+
+        为什么中文名在前：源那边（Animeko / 弹弹play）的中文索引命中率更高；
+        原名兜的是"中文名被译得不一样"的那些。
+        """
+        出: list[str] = []
+        for 词 in (self.标题, self.原名):
+            词 = str(词 or "").strip()
+            if 词 and 词 not in 出:
+                出.append(词)
+        return 出
 
     # ---- 派生信息 ----
     @property

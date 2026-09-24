@@ -700,6 +700,17 @@ class 资料库:
         行 = self.一个("SELECT 媒体id FROM 集 WHERE 文件路径=?", (文本,))
         return int(行["媒体id"]) if 行 else None
 
+    def 按路径找集(self, 路径: str | Path) -> Optional[sqlite3.Row]:
+        """按文件路径找到"这一集"那一行（``媒体id`` / ``季号`` / ``集号`` / ``标题``）。
+
+        为什么需要它：弹幕必须按**库里的季集**去取（用户会把文件名改成
+        ``146.SDR.8bit…`` 这种，文件名里的数字不可信 —— 见
+        :mod:`wangpan.danmaku.库身份`）。``文件`` 表只记了"哪个媒体"，季集在 ``集`` 表里。
+        """
+        return self.一个(
+            "SELECT 媒体id, 季号, 集号, 标题, 文件路径 FROM 集 WHERE 文件路径=?",
+            (str(路径),))
+
     def 文件们(self, 媒体id: int) -> list[sqlite3.Row]:
         return self.全部("SELECT * FROM 文件 WHERE 媒体id=? ORDER BY 是主文件 DESC, id",
                        (媒体id,))

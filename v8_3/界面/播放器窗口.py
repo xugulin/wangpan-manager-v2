@@ -244,18 +244,22 @@ class 播放器窗口(QWidget):
     def _搬入(self, 页: 内核播放页) -> None:
         if 页.parentWidget() is self.画面区:
             return
-        self._原父 = 页.parentWidget()
-        self._原布局 = self._原父.layout() if self._原父 is not None else None
-        if self._原布局 is not None:
-            self._原布局.removeWidget(页)
-        页.setParent(self.画面区)
-        self._画面布局.addWidget(页)
-        页.show()
+        self._标搬动(页, True)
         try:
-            页.要全屏.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        页.要全屏.connect(self.设置全屏)
+            self._原父 = 页.parentWidget()
+            self._原布局 = self._原父.layout() if self._原父 is not None else None
+            if self._原布局 is not None:
+                self._原布局.removeWidget(页)
+            页.setParent(self.画面区)
+            self._画面布局.addWidget(页)
+            页.show()
+            try:
+                页.要全屏.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            页.要全屏.connect(self.设置全屏)
+        finally:
+            self._标搬动(页, False, 延迟毫秒=260)
 
     def _搬回(self) -> None:
         if self._内核页 is None or self._原父 is None:
@@ -263,11 +267,36 @@ class 播放器窗口(QWidget):
         页 = self._内核页
         if 页.parentWidget() is not self.画面区:
             return
-        self._画面布局.removeWidget(页)
-        页.setParent(self._原父)
-        if self._原布局 is not None:
-            self._原布局.insertWidget(0, 页)
-        页.show()
+        self._标搬动(页, True)
+        try:
+            self._画面布局.removeWidget(页)
+            页.setParent(self._原父)
+            if self._原布局 is not None:
+                self._原布局.insertWidget(0, 页)
+            页.show()
+        finally:
+            self._标搬动(页, False, 延迟毫秒=260)
+
+    def _标搬动(self, 页, 进行中: bool, 延迟毫秒: int = 0) -> None:
+        """告诉内核播放页"我正在搬窗口"：这段时间内**不许** AI 自动重开。
+
+        为什么要延迟解除：``setParent`` 之后 Qt 还会连着发一串 resize/布局事件
+        （正是"设置输出尺寸 + 重建控件"最密集的时刻），
+        所以搬完先按住 260ms，等这波动静过去再放行自动重开。
+        （真机 22:04:04 刚开过独立窗口，22:04:08 就崩了 —— 就是这两件事叠在一起。）
+        这个标记只影响"自动重开"，不影响手动播放/暂停/拖进度。
+        """
+        标记 = getattr(页, "标记窗口搬动", None)
+        if 标记 is None:
+            return
+        try:
+            标记(bool(进行中))
+        except Exception:  # noqa: BLE001
+            return
+        if 进行中 or 延迟毫秒 <= 0:
+            return
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(int(延迟毫秒), lambda: 标记(False))
 
     def 换会话(self, 会话, 标题: str = "") -> None:
         self.会话 = 会话
