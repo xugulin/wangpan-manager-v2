@@ -251,3 +251,67 @@ class 章节与缩略图测试(unittest.TestCase):
                  for y in range(0, 图.height(), 20)
                  if 图.pixelColor(x, y).lightness() > 20)
         self.assertGreater(非黑, 3, "缩略图不该是纯黑")
+
+
+class 多声道音频测试(unittest.TestCase):
+    """**5.1 音频必须能播**（真机崩溃的根因就在这里，必须钉死）。
+
+    背景：`解码._图像指针数组()` 原来默认只取 **4** 个平面，而 5.1 的 FLTP 音频
+    有 **6** 个平面 → `swr_convert` 去读 data[4]/data[5]，那是数组外的野指针，
+    越界访问把堆写坏 → 进程随机崩在任意 FFmpeg 组件里。
+    真机三次 core 分别在 `V2-音频`（swr_convert）、`V2-解封装`、`V2-缩略图`；
+    本地 1MB 的 5.1 素材也必崩（立体声因为只有 2 个平面一直没事）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not 有ffmpeg():
+            raise unittest.SkipTest("本机没有 ffmpeg，造不出多声道素材")
+        cls.临时 = 临时目录()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.临时.cleanup()
+
+    def _造(self, 编码: str, 声道: int) -> Path | None:
+        目标 = Path(self.临时.name) / f"{编码}_{声道}ch.mp4"
+        if 目标.is_file():
+            return 目标
+        import subprocess
+        参数 = ["ffmpeg", "-v", "error", "-y",
+              "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3",
+              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+              "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+              "-c:a", 编码, "-ac", str(声道)]
+        if 声道 > 2:
+            参数 += ["-channel_layout", "5.1"]
+        参数.append(str(目标))
+        子 = subprocess.run(参数, capture_output=True, timeout=180, text=True)
+        return 目标 if 目标.is_file() else None
+
+    def _播(self, 素材: Path) -> tuple[int, int]:
+        引擎 = 播放引擎()
+        self.addCleanup(引擎.停止)
+        引擎.打开(str(素材))
+        引擎.播放()
+        开始 = time.time()
+        while time.time() - 开始 < 3.0:
+            time.sleep(0.1)
+            if 引擎.统计.已解视频帧 > 5:
+                break
+        return int(引擎.统计.已解视频帧), int(引擎.统计.已丢视频帧)
+
+    def test_六声道不再崩且真的在解(self):
+        for 编码 in ("aac", "ac3", "eac3"):
+            素材 = self._造(编码, 6)
+            if 素材 is None:
+                self.skipTest(f"造不出 {编码} 5.1 素材")
+            已解, _丢 = self._播(素材)
+            self.assertGreater(已解, 5, f"{编码} 5.1 应该能正常解码（崩了的话这行都到不了）")
+
+    def test_立体声照常(self):
+        素材 = self._造("aac", 2)
+        if 素材 is None:
+            self.skipTest("造不出立体声素材")
+        已解, _丢 = self._播(素材)
+        self.assertGreater(已解, 5, "立体声当然要正常（回归保护）")
