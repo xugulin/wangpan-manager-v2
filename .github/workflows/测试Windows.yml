@@ -20,13 +20,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: 装依赖（PySide6）/ 建自带运行环境
+      - name: 装依赖（requirements.txt）/ 建自带运行环境
         shell: pwsh
         run: |
+          # ⚠️ 不能只装 PySide6 了：整合之后这个仓库里有 V1 那一层
+          #    （v8_3/：界面 / 三家网盘适配器桥 / AI），它要 httpx、pyahocorasick、
+          #    pypinyin、qrcode、oss2、websocket-client …… 只装 PySide6 的话
+          #    V1 那 449 条测试会在 import 阶段就全红。
           python -m venv 运行环境/venv
           运行环境\venv\Scripts\python.exe -m pip install --upgrade pip
-          运行环境\venv\Scripts\python.exe -m pip install PySide6
-          运行环境\venv\Scripts\python.exe -c "import PySide6; print('PySide6', PySide6.__version__)"
+          运行环境\venv\Scripts\python.exe -m pip install -r requirements.txt
+          运行环境\venv\Scripts\python.exe -c "import PySide6, httpx, ahocorasick, pypinyin, qrcode; print('依赖就绪：PySide6', PySide6.__version__, '| httpx', httpx.__version__)"
 
       - name: 下载 Windows 版 FFmpeg 运行库（libav* 的 DLL）
         shell: pwsh
@@ -53,6 +57,18 @@ jobs:
           # ⚠️ 不要用 python -c "…中文…"：Windows 控制台是 cp936，
           #    命令行里带中文会直接 UnicodeEncodeError（真机 CI 踩过）。跑 UTF-8 文件。
           运行环境\venv\Scripts\python.exe 工具\自检.py
+
+      - name: 整合入口能起来（命令行模式，顺带验证 V1 界面层与三家适配器在 Windows 上可导入）
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          # 这几条不播视频，只看"合并后的入口与两套血脉能不能加载"：
+          #   启动.py --cli 会走 配置 → 网盘实例列表 → 适配器目录校验 这一整条 V1 链路。
+          运行环境\venv\Scripts\python.exe 启动.py --cli 网盘列表
+          if ($LASTEXITCODE -ne 0) { throw "整合入口的 CLI 模式没起来（退出码 $LASTEXITCODE）" }
 
       - name: 单元测试（离屏 Qt）
         shell: pwsh
